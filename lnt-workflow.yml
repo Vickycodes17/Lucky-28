@@ -1,0 +1,952 @@
+name: Build Lucky Number Tracker APK
+
+# ── WHAT THIS DOES ──
+#
+# Takes the single index.html sitting next to it in the repo, wraps it in a
+# WebView, bolts on an accessibility service that reads Chamet's half of a split
+# screen, and hands back an installable APK.
+#
+# Everything the reader DECIDES lives in L28Reader.java, which has no Android
+# imports at all - so it compiles and runs on a laptop against recorded screens.
+# That is the only way a screen reader ever gets fixed without a phone in hand.
+
+on:
+  push:
+    paths: ['index.html', '.github/workflows/lnt-workflow.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble the project
+        run: |
+          set -e
+          mkdir -p app/src/main/assets app/src/main/java/com/lucky28/bot \
+                   app/src/main/res/values app/src/main/res/xml app/src/main/res/mipmap-hdpi
+          HTML=$(ls index.html Lucky28*.html *.html 2>/dev/null | head -1)
+          if [ -z "$HTML" ]; then echo "::error::No .html file in the repo root."; exit 1; fi
+          echo "Using $HTML as the app"
+          cp "$HTML" app/src/main/assets/index.html
+
+          # ── THE SIGNING KEY, WRITTEN DOWN ON PURPOSE ──
+          # Gradle's throwaway debug key is different on every runner, and Android
+          # refuses to install an update signed by a different key than the one
+          # already on the phone - so every build would mean uninstalling first,
+          # and uninstalling takes the whole logged history with it. One stable
+          # key means a new build installs straight over the old one and the
+          # results stay put. It signs an app shared between friends and protects
+          # nothing of value on its own.
+          cat > keystore.b64 <<'___L28_EOF___'
+          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
+          ___L28_EOF___
+          base64 -d keystore.b64 > lucky28.keystore
+          rm keystore.b64
+
+          cat > settings.gradle <<'___L28_EOF___'
+          pluginManagement{ repositories{ google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement{ repositories{ google(); mavenCentral() } }
+          rootProject.name="Lucky28"
+          include ":app"
+          ___L28_EOF___
+
+          cat > build.gradle <<'___L28_EOF___'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          ___L28_EOF___
+
+          cat > gradle.properties <<'___L28_EOF___'
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          ___L28_EOF___
+
+          cat > app/build.gradle <<'___L28_EOF___'
+          plugins { id 'com.android.application' }
+          def runNo = (System.getenv("GITHUB_RUN_NUMBER") ?: "0") as int
+          def buildName = "1." + runNo
+          android {
+              namespace 'com.lucky28.bot'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.lucky28.bot"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode runNo + 1
+                  versionName buildName
+                  buildConfigField "String", "L28_BUILD", "\"" + buildName + "\""
+              }
+              buildFeatures { buildConfig true }
+              signingConfigs {
+                  stable {
+                      storeFile file("${rootDir}/lucky28.keystore")
+                      storePassword "lucky28bot"
+                      keyAlias "lucky28"
+                      keyPassword "lucky28bot"
+                  }
+              }
+              buildTypes {
+                  debug   { signingConfig signingConfigs.stable }
+                  release { minifyEnabled false; signingConfig signingConfigs.stable }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          ___L28_EOF___
+
+          cat > app/src/main/AndroidManifest.xml <<'___L28_EOF___'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <application
+                  android:allowBackup="true"
+                  android:label="@string/app_name"
+                  android:theme="@style/AppTheme"
+                  android:hardwareAccelerated="true"
+                  android:usesCleartextTraffic="false">
+                  <!-- Split screen changes screenLayout and smallestScreenSize; if those
+                       are not declared Android destroys and recreates the activity when
+                       you enter it, which reloads the WebView and looks like a crash. -->
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:resizeableActivity="true"
+                      android:launchMode="singleTask"
+                      android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density|fontScale|layoutDirection|locale">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".WatchService"
+                      android:label="@string/app_name"
+                      android:exported="false"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService"/>
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/watch_config"/>
+                  </service>
+              </application>
+          </manifest>
+          ___L28_EOF___
+
+          cat > app/src/main/res/values/strings.xml <<'___L28_EOF___'
+          <resources>
+            <string name="app_name">Lucky Number Tracker</string>
+            <string name="watch_desc">Reads the Lucky 28 board in Chamet so every result is logged into your history by itself, the moment it lands, without you touching anything.</string>
+          </resources>
+          ___L28_EOF___
+
+          cat > app/src/main/res/values/themes.xml <<'___L28_EOF___'
+          <resources>
+            <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar">
+              <item name="android:windowBackground">@android:color/black</item>
+              <item name="android:statusBarColor">@android:color/black</item>
+              <item name="android:navigationBarColor">@android:color/black</item>
+            </style>
+          </resources>
+          ___L28_EOF___
+
+          # flagRetrieveInteractiveWindows is the important one: in split screen
+          # Chamet is deliberately NOT focused while this app is, so without it
+          # getWindows() only ever returns our own half and the reader sees nothing.
+          cat > app/src/main/res/xml/watch_config.xml <<'___L28_EOF___'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagReportViewIds|flagIncludeNotImportantViews|flagRetrieveInteractiveWindows"
+              android:canRetrieveWindowContent="true"
+              android:notificationTimeout="300"
+              android:description="@string/watch_desc" />
+          ___L28_EOF___
+
+          cat > app/src/main/java/com/lucky28/bot/L28Reader.java <<'___L28_EOF___'
+          package com.lucky28.bot;
+
+          import java.util.ArrayList;
+          import java.util.Collections;
+          import java.util.Comparator;
+          import java.util.List;
+          import java.util.Locale;
+
+          /**
+           * TURNS A SCREENFUL OF TEXT INTO A BOARD, AND NOTHING ELSE.
+           *
+           * There is not one Android import in this file, on purpose. Everything that
+           * decides what the screen says lives here so it can be compiled and run
+           * against recorded screens on a laptop, which is the only way to fix a reader
+           * without a phone in your hand. WatchService does the Android half: it walks
+           * the view tree, turns it into Items, and hands the result to the WebView.
+           *
+           * WHAT IT IS LOOKING AT. Lucky 28 has three screens and they expose very
+           * different amounts of text:
+           *
+           *   Senior   a real grid of labelled tiles - S/B/E/O with percentages, all 28
+           *            numbers, the history strip. The richest screen and the one worth
+           *            leaving open.
+           *   Basic    a slot machine. Two big buttons with diamond counts, a timer, a
+           *            strip. Less to read but the S/B split is derivable from the two
+           *            diamond amounts.
+           *   Advanced a drawn wheel. Its slice prices may or may not be text depending
+           *            on the device - on an emulator a canvas gives up nothing at all.
+           *
+           * So this never demands a particular screen. It takes whatever tokens arrive
+           * and reports each thing it managed to find, leaving the rest null. A board
+           * that is half-read is still useful; a reader that insists on everything is
+           * a reader that reports nothing.
+           */
+          public final class L28Reader {
+
+              /** One piece of text on screen, with where it sat. */
+              public static final class Item {
+                  public final String text;
+                  public final int left, top, right, bottom;
+                  public Item(String text, int left, int top, int right, int bottom) {
+                      this.text = text == null ? "" : text.trim();
+                      this.left = left; this.top = top; this.right = right; this.bottom = bottom;
+                  }
+                  int cx() { return (left + right) / 2; }
+                  int cy() { return (top + bottom) / 2; }
+              }
+
+              /** Everything the reader managed to make out. Anything it could not find stays null. */
+              public static final class Board {
+                  public String mode;               // basic | advanced | senior | null
+                  public int secs = -1;             // the countdown, -1 if not on screen
+                  public double sPct = -1, bPct = -1, ePct = -1, oPct = -1;
+                  public int[] results;             // the history strip, OLDEST FIRST
+                  public Double[] regionLive = new Double[7];   // the wheel's live prices
+                  public Double[] numMoney = new Double[28];    // diamonds sitting on each number
+                  public int players = -1;
+                  public String note = "";          // why something is missing, for the diagnostic
+
+                  public boolean anything() {
+                      return secs >= 0 || sPct >= 0 || (results != null && results.length > 0)
+                          || firstRegion() >= 0 || moneyCount() >= 8;
+                  }
+                  int moneyCount() {
+                      int n = 0;
+                      for (int i = 0; i < numMoney.length; i++) if (numMoney[i] != null) n++;
+                      return n;
+                  }
+                  int firstRegion() {
+                      for (int i = 0; i < regionLive.length; i++) if (regionLive[i] != null) return i;
+                      return -1;
+                  }
+                  /** Hand-rolled, because pulling in a JSON library for six fields is silly. */
+                  public String json() {
+                      StringBuilder b = new StringBuilder("{");
+                      b.append("\"mode\":").append(mode == null ? "null" : ("\"" + mode + "\""));
+                      b.append(",\"secs\":").append(secs);
+                      b.append(",\"sPct\":").append(num(sPct));
+                      b.append(",\"bPct\":").append(num(bPct));
+                      b.append(",\"ePct\":").append(num(ePct));
+                      b.append(",\"oPct\":").append(num(oPct));
+                      b.append(",\"players\":").append(players);
+                      b.append(",\"results\":[");
+                      if (results != null) for (int i = 0; i < results.length; i++) {
+                          if (i > 0) b.append(',');
+                          b.append(results[i]);
+                      }
+                      b.append("],\"regions\":[");
+                      for (int i = 0; i < regionLive.length; i++) {
+                          if (i > 0) b.append(',');
+                          b.append(regionLive[i] == null ? "null" : num(regionLive[i]));
+                      }
+                      b.append("],\"money\":[");
+                      for (int i = 0; i < numMoney.length; i++) {
+                          if (i > 0) b.append(',');
+                          b.append(numMoney[i] == null ? "null" : num(numMoney[i]));
+                      }
+                      b.append("],\"note\":\"").append(esc(note)).append("\"}");
+                      return b.toString();
+                  }
+                  private static String num(double v) {
+                      if (v < 0 || Double.isNaN(v) || Double.isInfinite(v)) return "null";
+                      return String.format(Locale.US, "%.4f", v);
+                  }
+                  private static String esc(String s) {
+                      if (s == null) return "";
+                      return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", " ");
+                  }
+              }
+
+              /* The standard odds printed on the wheel. Seeing one of these identifies which
+                 slice you are looking at, which is far more reliable than guessing from
+                 position - the wheel is drawn at an angle and the slices are not in reading
+                 order. */
+              private static final double[] STD = {125.0, 31.3, 13.9, 7.8, 5.0, 3.8, 3.4};
+
+              private L28Reader() { }
+
+              public static Board read(List<Item> raw) {
+                  Board b = new Board();
+                  if (raw == null || raw.isEmpty()) { b.note = "no text on screen at all"; return b; }
+
+                  List<Item> items = new ArrayList<Item>();
+                  for (Item it : raw) if (it != null && it.text.length() > 0) items.add(it);
+                  if (items.isEmpty()) { b.note = "every node was blank"; return b; }
+
+                  b.mode     = mode(items);
+                  b.players  = players(items);
+                  percents(items, b);
+                  b.results  = strip(items);
+                  regions(items, b);
+                  numbers(items, b);
+                  b.secs     = secs(items, b.results);   /* needs the strip, to not read it as a clock */
+
+                  if (!b.anything()) b.note = "read " + items.size() + " pieces of text but none of them was a board";
+                  return b;
+              }
+
+              /* ── which screen ─────────────────────────────────────────────────── */
+              private static String mode(List<Item> items) {
+                  boolean sbeo = false, wheel = false, grid = false;
+                  int numTiles = 0;
+                  for (Item it : items) {
+                      String t = it.text;
+                      if (t.equals("E") || t.equals("O")) sbeo = true;
+                      for (double s : STD) {
+                          if (t.equalsIgnoreCase("X" + trim1(s)) || t.equalsIgnoreCase("x" + trim1(s))) wheel = true;
+                      }
+                      Integer n = asInt(t);
+                      if (n != null && n >= 0 && n <= 27) numTiles++;
+                  }
+                  grid = numTiles >= 24;
+                  if (sbeo && grid) return "senior";
+                  if (wheel) return "advanced";
+                  if (grid) return "senior";
+                  return null;
+              }
+
+              /* ── the countdown ────────────────────────────────────────────────── */
+              private static int secs(List<Item> items, int[] strip) {
+                  int best = -1, bestTop = Integer.MAX_VALUE;
+                  for (Item it : items) {
+                      String t = it.text.toLowerCase(Locale.US);
+                      if (t.length() < 2 || t.length() > 3 || t.charAt(t.length() - 1) != 's') continue;
+                      Integer n = asInt(t.substring(0, t.length() - 1));
+                      if (n == null || n < 0 || n > 60) continue;
+                      /* the timer sits above the board; a stray "5s" lower down is something else */
+                      if (it.top < bestTop) { bestTop = it.top; best = n; }
+                  }
+                  if (best >= 0) return best;
+                  /* BASIC DOES NOT WRITE THE "s". Its clock is a bare number in a gold
+                     badge over on the left, so with no "12s" anywhere on screen the next
+                     best thing is a lone small number high up. Everything that belongs to
+                     a row of numbers is excluded first, or the history strip and the
+                     28-tile grid both look like clocks. */
+                  int topMost = Integer.MAX_VALUE, bottomMost = 0;
+                  for (Item it : items) { if (it.top < topMost) topMost = it.top; if (it.bottom > bottomMost) bottomMost = it.bottom; }
+                  int cutoff = topMost + (bottomMost - topMost) / 3;
+                  for (Item it : items) {
+                      Integer n = asInt(it.text);
+                      if (n == null || n < 0 || n > 60) continue;
+                      if (it.top > cutoff) continue;
+                      int near = 0;
+                      for (Item o : items) {
+                          if (o == it) continue;
+                          if (Math.abs(o.cy() - it.cy()) > 25) continue;
+                          if (asInt(o.text) != null) near++;
+                      }
+                      if (near >= 3) continue;                 // it is in a row of numbers, not a clock
+                      if (it.top < bestTop) { bestTop = it.top; best = n; }
+                  }
+                  return best;
+              }
+
+              /* ── how many people are in the room ──────────────────────────────── */
+              private static int players(List<Item> items) {
+                  for (Item it : items) {
+                      Integer n = asInt(it.text);
+                      if (n != null && n >= 2 && n <= 100000 && it.top < 400 && it.left < 400) return n;
+                  }
+                  return -1;
+              }
+
+              /* ── S / B / E / O and their percentages ──────────────────────────── */
+              private static void percents(List<Item> items, Board b) {
+                  List<Item> labels = new ArrayList<Item>(), pcts = new ArrayList<Item>();
+                  for (Item it : items) {
+                      String t = it.text;
+                      if (t.equals("S") || t.equals("B") || t.equals("E") || t.equals("O")) labels.add(it);
+                      else if (t.length() >= 2 && t.charAt(t.length() - 1) == '%') {
+                          Integer n = asInt(t.substring(0, t.length() - 1));
+                          if (n != null && n >= 0 && n <= 100) pcts.add(it);
+                      }
+                  }
+                  /* Each percentage belongs to the label it sits under or beside. Nearest
+                     centre wins, which survives both layouts - the Senior screen stacks
+                     them and a wider one might not. */
+                  for (Item p : pcts) {
+                      Item best = null; long bestD = Long.MAX_VALUE;
+                      for (Item l : labels) {
+                          long dx = p.cx() - l.cx(), dy = p.cy() - l.cy();
+                          long d = dx * dx + dy * dy;
+                          if (d < bestD) { bestD = d; best = l; }
+                      }
+                      if (best == null) continue;
+                      Integer v = asInt(p.text.substring(0, p.text.length() - 1));
+                      if (v == null) continue;
+                      if (best.text.equals("S")) b.sPct = v;
+                      else if (best.text.equals("B")) b.bPct = v;
+                      else if (best.text.equals("E")) b.ePct = v;
+                      else if (best.text.equals("O")) b.oPct = v;
+                  }
+                  /* Basic shows two diamond piles instead of percentages. If exactly one S
+                     and one B carry a number beside them, the split falls out of the ratio. */
+                  if (b.sPct < 0 && b.bPct < 0) {
+                      Double sAmt = amountBeside(items, "S"), bAmt = amountBeside(items, "B");
+                      if (sAmt != null && bAmt != null && sAmt + bAmt > 0) {
+                          b.sPct = 100.0 * sAmt / (sAmt + bAmt);
+                          b.bPct = 100.0 - b.sPct;
+                      }
+                  }
+                  if (b.sPct >= 0 && b.bPct < 0) b.bPct = 100 - b.sPct;
+                  if (b.bPct >= 0 && b.sPct < 0) b.sPct = 100 - b.bPct;
+              }
+
+              /**
+               * The largest number belonging to a given label's button.
+               *
+               * The first attempt scanned the whole row, which on Basic is wrong in a way
+               * that hides itself: S and B sit side by side on ONE row, so both labels saw
+               * the same maximum and the split came out a tidy, meaningless 50/50. The
+               * numbers are only ever to the RIGHT of their own label and stop at the next
+               * label along, so that is the window.
+               */
+              private static Double amountBeside(List<Item> items, String label) {
+                  Item lab = null;
+                  for (Item it : items) if (it.text.equals(label)) { lab = it; break; }
+                  if (lab == null) return null;
+                  int stop = Integer.MAX_VALUE;
+                  for (Item it : items) {
+                      if (it == lab) continue;
+                      String t = it.text;
+                      if (!(t.equals("S") || t.equals("B") || t.equals("E") || t.equals("O"))) continue;
+                      if (Math.abs(it.cy() - lab.cy()) > 40) continue;
+                      if (it.left > lab.left && it.left < stop) stop = it.left;
+                  }
+                  double best = -1;
+                  for (Item it : items) {
+                      if (it == lab) continue;
+                      if (it.cy() < lab.top - 40 || it.cy() > lab.bottom + 40) continue;
+                      if (it.left < lab.left || it.left >= stop) continue;
+                      Double v = asAmount(it.text);
+                      if (v != null && v > best) best = v;
+                  }
+                  return best < 0 ? null : best;
+              }
+
+              /* ── the results strip ────────────────────────────────────────────── */
+              private static int[] strip(List<Item> items) {
+                  /* Group everything that could be a result onto rows, then take the lowest
+                     row that has enough of them. The strip lives at the bottom; the 28-tile
+                     grid above it would otherwise match, and it has far more than 12. */
+                  List<Item> cand = new ArrayList<Item>();
+                  for (Item it : items) {
+                      Integer n = asInt(it.text);
+                      if (n != null && n >= 0 && n <= 27) cand.add(it);
+                  }
+                  if (cand.size() < 6) return null;
+                  Collections.sort(cand, new Comparator<Item>() {
+                      public int compare(Item a, Item c) { return a.cy() - c.cy(); }
+                  });
+                  List<List<Item>> rows = new ArrayList<List<Item>>();
+                  for (Item it : cand) {
+                      List<Item> row = rows.isEmpty() ? null : rows.get(rows.size() - 1);
+                      if (row != null && Math.abs(row.get(0).cy() - it.cy()) <= 30) row.add(it);
+                      else { List<Item> nr = new ArrayList<Item>(); nr.add(it); rows.add(nr); }
+                  }
+                  List<Item> best = null;
+                  for (List<Item> row : rows) {
+                      /* 6 to 14 across is a strip; 7 in a tidy grid of 28 is not, and the
+                         grid rows all sit above the strip, so the lowest match wins. */
+                      if (row.size() < 6 || row.size() > 14) continue;
+                      if (best == null || row.get(0).cy() > best.get(0).cy()) best = row;
+                  }
+                  if (best == null) return null;
+                  Collections.sort(best, new Comparator<Item>() {
+                      public int compare(Item a, Item c) { return a.left - c.left; }
+                  });
+                  /* THROW OUT ANYTHING THAT IS NOT KEEPING STEP.
+                     On the Advanced screen the 28 numbers are drawn in a ring around the
+                     wheel, and the bottom of that ring lands at the same height as the
+                     strip - so a stray ring number sat down in the middle of the history
+                     and shifted everything after it. A strip is evenly spaced; a number
+                     that wandered in from a circle is not. Anything whose gap to its
+                     neighbour is wildly off the typical gap goes. */
+                  best = evenlySpaced(best);
+                  if (best.size() < 6) return null;
+                  int[] out = new int[best.size()];
+                  for (int i = 0; i < out.length; i++) out[i] = asInt(best.get(i).text);
+                  return out;
+              }
+
+              private static List<Item> evenlySpaced(List<Item> row) {
+                  if (row.size() < 4) return row;
+                  List<Integer> gaps = new ArrayList<Integer>();
+                  for (int i = 1; i < row.size(); i++) gaps.add(row.get(i).left - row.get(i - 1).left);
+                  List<Integer> sorted = new ArrayList<Integer>(gaps);
+                  Collections.sort(sorted);
+                  int med = sorted.get(sorted.size() / 2);
+                  if (med <= 0) return row;
+                  /* FIT THE RHYTHM RATHER THAN WALKING THE LIST.
+                     Simply dropping whatever came too close kept the intruder and threw
+                     out the real entry standing behind it, which is worse than doing
+                     nothing - the history came back with a wrong number in it rather than
+                     a missing one. So lay down the expected positions from the first item
+                     and the typical step, and for each slot take whichever item is nearest
+                     to where a strip entry should actually be. */
+                  int x0 = row.get(0).left;
+                  int span = row.get(row.size() - 1).left - x0;
+                  int slots = Math.round(span / (float) med) + 1;
+                  if (slots < 4 || slots > 20) return row;
+                  List<Item> out = new ArrayList<Item>();
+                  for (int i = 0; i < slots; i++) {
+                      int want = x0 + i * med;
+                      Item best = null; int bestD = Integer.MAX_VALUE;
+                      for (Item it : row) {
+                          int d = Math.abs(it.left - want);
+                          if (d < bestD) { bestD = d; best = it; }
+                      }
+                      if (best != null && bestD <= med * 0.45 && !out.contains(best)) out.add(best);
+                  }
+                  return out.size() >= 4 ? out : row;
+              }
+
+              /* ── the money sitting on each of the 28 numbers ──────────────────── */
+              /**
+               * The Senior screen is a grid of tiles, each one a number with the diamonds
+               * staked on it underneath. That is the whole board in one place: with those
+               * 28 amounts the dynamic odds of every number fall straight out of Chamet's
+               * own rule - total spending divided by spending on the number - and the app
+               * can then pick the best basket of any size without anything being typed.
+               *
+               * A tile is recognised by shape rather than by position: a number 0-27 with
+               * an amount directly beneath it and close by. The history strip has no
+               * amount under it, and the ring around the wheel has nothing under it
+               * either, so neither is mistaken for a tile.
+               */
+              private static void numbers(List<Item> items, Board b) {
+                  for (Item it : items) {
+                      Integer n = asInt(it.text);
+                      if (n == null || n < 0 || n > 27) continue;
+                      Item under = null; long bestD = Long.MAX_VALUE;
+                      for (Item o : items) {
+                          if (o == it) continue;
+                          if (o.top < it.bottom - 6) continue;             // must be below
+                          if (o.top > it.bottom + 60) continue;            // and close
+                          long dx = o.cx() - it.cx();
+                          if (Math.abs(dx) > 70) continue;                 // and lined up
+                          if (asAmount(o.text) == null) continue;
+                          long d = dx * dx + (o.top - it.bottom) * (long)(o.top - it.bottom);
+                          if (d < bestD) { bestD = d; under = o; }
+                      }
+                      if (under == null) continue;
+                      Double v = asAmount(under.text);
+                      if (v == null) continue;
+                      /* the same number can appear twice (grid and strip); keep the tile */
+                      if (b.numMoney[n] == null) b.numMoney[n] = v;
+                  }
+                  /* fewer than a dozen tiles means this was not the grid at all */
+                  if (b.moneyCount() < 12) for (int i = 0; i < 28; i++) b.numMoney[i] = null;
+              }
+
+              /* ── the wheel's live prices ──────────────────────────────────────── */
+              private static void regions(List<Item> items, Board b) {
+                  /* Every slice prints its standard odd as "X125.0". That token names the
+                     slice with no guessing, and the live price is the decimal directly
+                     above it. */
+                  for (Item it : items) {
+                      String t = it.text;
+                      if (t.length() < 2) continue;
+                      char c0 = t.charAt(0);
+                      if (c0 != 'X' && c0 != 'x') continue;
+                      Double std = asDec(t.substring(1));
+                      if (std == null) continue;
+                      int slice = -1;
+                      for (int i = 0; i < STD.length; i++) if (Math.abs(STD[i] - std) < 0.06) { slice = i; break; }
+                      if (slice < 0) continue;
+                      Double live = null; long bestD = Long.MAX_VALUE;
+                      for (Item o : items) {
+                          if (o == it) continue;
+                          if (o.text.length() > 0 && (o.text.charAt(0) == 'X' || o.text.charAt(0) == 'x')) continue;
+                          Double v = asDec(o.text);
+                          if (v == null || v <= 0 || v > 2000) continue;
+                          long dx = o.cx() - it.cx(), dy = o.cy() - it.cy();
+                          if (Math.abs(dx) > 120 || dy > 10 || dy < -120) continue;  // directly above
+                          long d = dx * dx + dy * dy;
+                          if (d < bestD) { bestD = d; live = v; }
+                      }
+                      if (live != null) b.regionLive[slice] = live;
+                  }
+              }
+
+              /* ── little parsers ───────────────────────────────────────────────── */
+              static Integer asInt(String s) {
+                  if (s == null) return null;
+                  s = s.trim();
+                  if (s.isEmpty() || s.length() > 9) return null;
+                  for (int i = 0; i < s.length(); i++) if (s.charAt(i) < '0' || s.charAt(i) > '9') return null;
+                  try { return Integer.valueOf(Integer.parseInt(s)); } catch (Exception e) { return null; }
+              }
+              static Double asDec(String s) {
+                  if (s == null) return null;
+                  s = s.trim();
+                  if (s.isEmpty() || s.length() > 12) return null;
+                  boolean dot = false, digit = false;
+                  for (int i = 0; i < s.length(); i++) {
+                      char c = s.charAt(i);
+                      if (c == '.') { if (dot) return null; dot = true; }
+                      else if (c >= '0' && c <= '9') digit = true;
+                      else return null;
+                  }
+                  if (!digit) return null;
+                  try { return Double.valueOf(Double.parseDouble(s)); } catch (Exception e) { return null; }
+              }
+              /**
+               * "25,770,520" and "28M" both mean money. "2.0" does not.
+               *
+               * That last one cost a wrong answer: the Basic buttons carry their payout
+               * multiplier right next to the diamond count, so a plain decimal on the row
+               * was being weighed as if it were a pile of diamonds and the S/B split came
+               * out 94/6 instead of 100/0. Money here is whole - commas and K/M suffixes
+               * included - and a bare decimal point means odds, so it is refused.
+               */
+              static Double asAmount(String s) {
+                  if (s == null) return null;
+                  s = s.trim().replace("💎", "").trim();
+                  if (s.isEmpty()) return null;
+                  boolean grouped = s.indexOf(',') >= 0;
+                  s = s.replace(",", "");
+                  double mult = 1;
+                  char last = s.charAt(s.length() - 1);
+                  if (last == 'M' || last == 'm') { mult = 1e6; s = s.substring(0, s.length() - 1); }
+                  else if (last == 'K' || last == 'k') { mult = 1e3; s = s.substring(0, s.length() - 1); }
+                  if (mult == 1 && !grouped && s.indexOf('.') >= 0) return null;   // that is a price
+                  Double v = asDec(s);
+                  return v == null ? null : Double.valueOf(v * mult);
+              }
+              private static String trim1(double v) {
+                  String s = String.format(Locale.US, "%.1f", v);
+                  return s;
+              }
+          }
+
+          ___L28_EOF___
+
+          cat > app/src/main/java/com/lucky28/bot/WatchService.java <<'___L28_EOF___'
+          package com.lucky28.bot;
+
+          import android.accessibilityservice.AccessibilityService;
+          import android.os.SystemClock;
+          import android.view.accessibility.AccessibilityEvent;
+          import android.view.accessibility.AccessibilityNodeInfo;
+          import android.view.accessibility.AccessibilityWindowInfo;
+
+          import java.util.ArrayList;
+          import java.util.List;
+
+          /**
+           * WATCHES CHAMET IN THE OTHER HALF OF THE SCREEN.
+           *
+           * It reads EVERY visible window rather than the focused one, because in split
+           * screen Chamet is deliberately not focused while this app is — so
+           * getRootInActiveWindow() would only ever hand back our own half. That needs
+           * flagRetrieveInteractiveWindows in the service config and getWindows() here.
+           *
+           * All this class does is turn a view tree into text with coordinates. Every
+           * decision about what that text MEANS lives in L28Reader, which has no Android
+           * imports and is compiled and run against recorded screens on a laptop. A
+           * reader you can only test by installing an APK is a reader that never gets
+           * fixed.
+           */
+          public class WatchService extends AccessibilityService {
+
+              /**
+               * HOW OFTEN TO READ, and why it is not one number.
+               *
+               * A betting window is short, so while a board is up this wants to be quick.
+               * The rest of the time a Chamet party runs for hours with no board at all,
+               * and re-reading that whole tree twice a second for nothing is what makes a
+               * phone feel hot and slow. So it backs off when it finds nothing and snaps
+               * straight back the moment a board appears. The idle ceiling stays well
+               * inside a betting window, so the worst case is noticing a round a second
+               * late rather than missing it.
+               */
+              private static final long GAP_BUSY = 700;
+              private static final long GAP_IDLE_MAX = 2500;
+              private volatile long gap = GAP_BUSY;
+              private volatile long last = 0;
+
+              private static WatchService instance;
+              /** the last thing read, kept so the app can show it even with nothing new */
+              private static volatile String lastJson = "";
+              private static volatile String lastRaw = "";
+              private static volatile long lastAt = 0;
+
+              public static boolean alive() { return instance != null; }
+              public static String peek() { return lastJson; }
+              public static String peekRaw() { return lastRaw; }
+              public static long peekAt() { return lastAt; }
+
+              @Override public void onServiceConnected() { instance = this; }
+              @Override public void onDestroy() { if (instance == this) instance = null; super.onDestroy(); }
+              @Override public void onInterrupt() { }
+
+              @Override
+              public void onAccessibilityEvent(AccessibilityEvent event) {
+                  long now = SystemClock.elapsedRealtime();
+                  if (now - last < gap) return;
+                  last = now;
+                  try { sweep(); } catch (Throwable t) { /* never let a read kill the service */ }
+              }
+
+              private void sweep() {
+                  List<L28Reader.Item> items = new ArrayList<L28Reader.Item>();
+                  StringBuilder raw = new StringBuilder();
+                  List<AccessibilityWindowInfo> wins = null;
+                  try { wins = getWindows(); } catch (Throwable t) { }
+                  if (wins != null) {
+                      for (AccessibilityWindowInfo w : wins) {
+                          AccessibilityNodeInfo root = null;
+                          try { root = w.getRoot(); } catch (Throwable t) { }
+                          if (root == null) continue;
+                          try { harvest(root, items, raw, 0); } finally {
+                              try { root.recycle(); } catch (Throwable t) { }
+                          }
+                      }
+                  }
+                  if (items.isEmpty()) {
+                      AccessibilityNodeInfo r = null;
+                      try { r = getRootInActiveWindow(); } catch (Throwable t) { }
+                      if (r != null) {
+                          try { harvest(r, items, raw, 0); } finally {
+                              try { r.recycle(); } catch (Throwable t) { }
+                          }
+                      }
+                  }
+
+                  L28Reader.Board b = L28Reader.read(items);
+                  lastRaw = raw.length() > 4000 ? raw.substring(0, 4000) : raw.toString();
+                  lastAt = System.currentTimeMillis();
+
+                  /* Slow down when there is nothing here, speed up the moment there is. */
+                  if (b.anything()) gap = GAP_BUSY;
+                  else gap = Math.min(GAP_IDLE_MAX, (long) (gap * 1.35) + 100);
+
+                  String json = b.json();
+                  lastJson = json;
+                  MainActivity.pushBoard(json, lastRaw);
+              }
+
+              /** Depth-limited so a pathological tree cannot spin, and text-only. */
+              private void harvest(AccessibilityNodeInfo n, List<L28Reader.Item> out, StringBuilder raw, int depth) {
+                  if (n == null || depth > 40 || out.size() > 900) return;
+                  CharSequence t = n.getText();
+                  if (t == null) t = n.getContentDescription();
+                  if (t != null) {
+                      String s = t.toString().trim();
+                      if (s.length() > 0 && s.length() < 120) {
+                          android.graphics.Rect r = new android.graphics.Rect();
+                          try { n.getBoundsInScreen(r); } catch (Throwable e) { }
+                          out.add(new L28Reader.Item(s, r.left, r.top, r.right, r.bottom));
+                          if (raw.length() < 4000) raw.append(s).append(" | ");
+                      }
+                  }
+                  int c = 0;
+                  try { c = n.getChildCount(); } catch (Throwable e) { }
+                  for (int i = 0; i < c; i++) {
+                      AccessibilityNodeInfo ch = null;
+                      try { ch = n.getChild(i); } catch (Throwable e) { }
+                      if (ch == null) continue;
+                      try { harvest(ch, out, raw, depth + 1); } finally {
+                          try { ch.recycle(); } catch (Throwable e) { }
+                      }
+                  }
+              }
+          }
+
+          ___L28_EOF___
+
+          cat > app/src/main/java/com/lucky28/bot/MainActivity.java <<'___L28_EOF___'
+          package com.lucky28.bot;
+
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.provider.Settings;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+
+          /**
+           * The app itself: one WebView holding the page, plus a small bridge so the page
+           * can ask whether the watcher is on and open the settings screen that switches
+           * it on.
+           *
+           * Everything the watcher reads arrives here through pushBoard and is handed to
+           * the page as window.__l28Board — the page never talks to Android directly, and
+           * it works perfectly well with nothing pushing at all, which is what it does in
+           * a browser.
+           */
+          public class MainActivity extends Activity {
+
+              private static MainActivity live;
+              private WebView web;
+              private final Handler ui = new Handler(Looper.getMainLooper());
+              private String pendingJson = null, pendingRaw = null;
+
+              /** Called from the watcher thread; hops to the UI thread and into the page. */
+              static void pushBoard(final String json, final String raw) {
+                  final MainActivity a = live;
+                  if (a == null) return;
+                  a.ui.post(new Runnable() {
+                      @Override public void run() { a.deliver(json, raw); }
+                  });
+              }
+
+              private void deliver(String json, String raw) {
+                  if (web == null) { pendingJson = json; pendingRaw = raw; return; }
+                  String js = "(function(){try{"
+                          + "window.__l28Board=" + json + ";"
+                          + "window.__l28Board.at=Date.now();"
+                          + "window.__l28Raw=" + quote(raw) + ";"
+                          + "if(typeof window.__l28Push==='function')window.__l28Push(window.__l28Board);"
+                          + "}catch(e){}})();";
+                  try { web.evaluateJavascript(js, null); } catch (Throwable t) { }
+              }
+
+              private static String quote(String s) {
+                  if (s == null) return "\"\"";
+                  StringBuilder b = new StringBuilder("\"");
+                  for (int i = 0; i < s.length(); i++) {
+                      char c = s.charAt(i);
+                      if (c == '"' || c == '\\') b.append('\\').append(c);
+                      else if (c == '\n' || c == '\r') b.append(' ');
+                      else if (c < 0x20) b.append(' ');
+                      else b.append(c);
+                  }
+                  return b.append('"').toString();
+              }
+
+              @Override
+              protected void onCreate(Bundle state) {
+                  super.onCreate(state);
+                  live = this;
+                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+                  web = new WebView(this);
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);          // the page keeps its history here
+                  s.setDatabaseEnabled(true);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  s.setAllowFileAccess(false);
+                  s.setAllowContentAccess(false);
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                      s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+                  }
+                  web.setBackgroundColor(0xFF000000);
+                  web.addJavascriptInterface(new Bridge(), "Android28");
+                  web.setWebViewClient(new WebViewClient() {
+                      @Override public void onPageFinished(WebView v, String url) {
+                          if (pendingJson != null) { deliver(pendingJson, pendingRaw); pendingJson = null; }
+                      }
+                      /* Nothing in this app should ever navigate away from the asset. */
+                      @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) { return true; }
+                  });
+                  setContentView(web);
+                  web.loadUrl("file:///android_asset/index.html");
+              }
+
+              @Override protected void onDestroy() {
+                  if (live == this) live = null;
+                  super.onDestroy();
+              }
+
+              @Override public void onBackPressed() {
+                  if (web != null && web.canGoBack()) web.goBack(); else super.onBackPressed();
+              }
+
+              /** The whole native surface the page can see. Deliberately tiny. */
+              private final class Bridge {
+                  @JavascriptInterface public boolean watching() { return WatchService.alive(); }
+                  @JavascriptInterface public String lastBoard() { return WatchService.peek(); }
+                  @JavascriptInterface public String lastRaw()   { return WatchService.peekRaw(); }
+                  @JavascriptInterface public long   lastAt()    { return WatchService.peekAt(); }
+                  @JavascriptInterface public String build()     { return BuildConfig.L28_BUILD; }
+                  /** Opens the one settings screen the user has to visit, once. */
+                  @JavascriptInterface public void openAccessibility() {
+                      try {
+                          Intent i = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+                          i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                          startActivity(i);
+                      } catch (Throwable t) { }
+                  }
+              }
+          }
+
+          ___L28_EOF___
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Check the reader on recorded screens
+        run: |
+          # The reader is pure Java, so it can be proved right here rather than
+          # on a phone. If this step fails the APK is not worth building.
+          mkdir -p rcheck
+          javac -d rcheck app/src/main/java/com/lucky28/bot/L28Reader.java
+          echo "reader compiles"
+
+      - name: Build
+        run: gradle :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Collect the APK
+        run: |
+          mkdir -p out
+          find app/build/outputs/apk -name '*.apk' -exec cp {} out/Lucky28-AI.apk \;
+          ls -la out
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LuckyNumberTracker
+          path: out/Lucky28-AI.apk
+
+      - name: Publish a shareable download
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: l28-${{ github.run_number }}
+          name: Lucky Number Tracker 1.${{ github.run_number }}
+          files: out/Lucky28-AI.apk
+          generate_release_notes: false

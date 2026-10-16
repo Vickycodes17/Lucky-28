@@ -6191,6 +6191,13 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        # Its default package list is "tools platform-tools", and Google has
+        # taken the long-obsolete 'tools' package out of the SDK repository -
+        # sdkmanager now stops with "Failed to find package 'tools'" (exit 1)
+        # before anything is built. Name exactly what this app compiles
+        # against instead: compileSdk 34, and the build-tools AGP 8.5 uses.
+        with:
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4

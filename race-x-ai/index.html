@@ -18441,7 +18441,8 @@ function pricePanelHTML(){
           '<div data-rxl="pool" style="font-size:9px;color:var(--text3);font-variant-numeric:tabular-nums"></div>'+
           '<div data-rxl="note" style="font-size:9px;color:var(--text3)">'+
             (early?'Early &mdash; these will move. '
-                  :(g.pass?'Both pay enough. ':'Too short &mdash; the lower is under '+valueLow().toFixed(1)+'. '))+
+                  :(g.pass?'Both pay enough. ':'Too short &mdash; '+(Math.min(g.a,g.b)<valueLow()
+                      ?'the lower is under '+valueLow().toFixed(1):'the higher is under '+valueHigh().toFixed(1))+'. '))+
             'A split returns <b style="color:'+tone+'">'+g.ret.toFixed(2)+'&times;</b> if either wins.'+
             '</div></div>'+
         '<button onclick="menuGo(\'value\')" title="Value bets" style="width:24px;height:24px;'+
@@ -21949,8 +21950,7 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
        Returns the change in units, or null if the board was never read. */
     function unitsOn(r, picks){
       if (!picks || picks[0] === picks[1]) return null;
-      var settle = (typeof settleOddsFor === 'function') ? settleOddsFor : raceOddsFor;
-      var o1 = settle(r, picks[0]), o2 = settle(r, picks[1]);   /* what it was paid at */
+      var o1 = raceOddsFor(r, picks[0]), o2 = raceOddsFor(r, picks[1]);
       if (!(o1 > 0) || !(o2 > 0)) return null;
       var ret = 1 / (1/o1 + 1/o2);                 /* paid the same either way */
       return (r.winner === picks[0] || r.winner === picks[1]) ? (ret - 1) : -1;
@@ -22015,18 +22015,27 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
        steps straight over it, so your backups and exports are byte-identical
        to what they would have been. A new race parses; the other seven
        thousand do not parse again. */
+    /* ...and the prices it CLOSED at ride along as o.settle: what the race was
+       actually paid at, where the reader saw the close (settleOddsFor, parsed
+       once here rather than per row). The picks are still made on the open
+       reading - the PRICE row backs the two shortest prices it could see - but
+       the money is settled on the close, the same as the Value page. */
     function parsedOdds(r){
       if (!r.liveOdds || r.liveOdds.length !== 3 || !r.vehicles || r.vehicles.length !== 3) return null;
+      var co = (r.closeOdds && r.closeOdds.length === 3) ? r.closeOdds : null;
       var c = r.__rxO;
-      if (c && c.src === r.liveOdds) return c.v;
-      var o = [null, null, null];
+      if (c && c.src === r.liveOdds && c.csrc === co) return c.v;
+      var o = [null, null, null], st = [null, null, null];
       for (var j = 0; j < 3; j++) {
         var v = parseFloat(String(r.liveOdds[j]).split('/')[0]);
         o[j] = (isFinite(v) && v > 0 && v < 50) ? v : null;
+        var w = co ? parseFloat(String(co[j]).split('/')[0]) : NaN;
+        st[j] = (isFinite(w) && w > 0 && w < 50) ? w : o[j];
       }
+      o.settle = st;
       try {
         Object.defineProperty(r, '__rxO', {
-          value: { src: r.liveOdds, v: o }, enumerable: false, configurable: true, writable: true
+          value: { src: r.liveOdds, csrc: co, v: o }, enumerable: false, configurable: true, writable: true
         });
       } catch(e){}
       return o;
@@ -22073,7 +22082,8 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
           var fresh = (r.t || 0) >= FWD;
           if (fresh) { fTot++; if (hit) fHit++; }
           if (picks[0] === picks[1]) continue;
-          var o1 = px(o, r, picks[0]), o2 = px(o, r, picks[1]);
+          var paid = o && o.settle;                   /* settled on the close */
+          var o1 = px(paid, r, picks[0]), o2 = px(paid, r, picks[1]);
           if (!(o1 > 0) || !(o2 > 0)) continue;
           var u = hit ? (1 / (1/o1 + 1/o2)) - 1 : -1;
           units += u; priced++;
@@ -22939,9 +22949,10 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
       if (s && s.get) { try { return s.get(false).odds; } catch(e){} }
       return null;
     }
+    /* what a pick was PAID at - the close where the race has one */
     function priceAt(o, r, vi){
-      if (o) { var i = r.vehicles.indexOf(vi); return i < 0 ? null : o[i]; }
-      return raceOddsFor(r, vi);
+      if (o) { var i = r.vehicles.indexOf(vi); return i < 0 ? null : (o.settle || o)[i]; }
+      return (typeof settleOddsFor === 'function') ? settleOddsFor(r, vi) : raceOddsFor(r, vi);
     }
 
     function picksAt(key, r, o){
@@ -23802,11 +23813,14 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
     let board=(m.tickAt>0)?(s*1000-(now-m.tickAt)):(s*1000-500-age);
     if(age<1200){
       if(board>s*1000)board=s*1000;
-      if(board<(s-1)*1000)board=Math.max(0,(s-1)*1000);
+      // held inside the digit's second - except the last one, which has to be
+      // free to run past 0 by however late this phone has seen Chamet close
+      if(s>1&&board<(s-1)*1000)board=(s-1)*1000;
     }
-    if(board<0)board=0;
+    // the learned offset goes on BEFORE the floor: added after it, a close
+    // that runs late froze the clock at "+offset" instead of reaching 0
     const ms=Math.max(0,board+(offset||0));
-    return {ms:ms,board:board,sure:m.tickAt>0,closed:false};
+    return {ms:ms,board:Math.max(0,board),sure:m.tickAt>0,closed:false};
   }
 
   /**
@@ -23867,7 +23881,9 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
     // as 1.7 - so one late bet on it can tip it under
     const edge=ex?Math.min(ex.exact[i1],ex.exact[i2]):null;
     const knife=pass&&!m.closed&&edge!=null&&edge<lo+0.1;
-    return {a:a,b:b,pass:pass,ret:(a*b)/(a+b),
+    // which bar it failed: the floor on the shorter one, or the bar on the longer
+    const why=Math.min(a,b)<lo?('the lower is under '+lo.toFixed(1)):('the higher is under '+hi.toFixed(1));
+    return {a:a,b:b,pass:pass,why:why,ret:(a*b)/(a+b),
             x1:ex?ex.exact[i1]:null, x2:ex?ex.exact[i2]:null,
             pot:ex?ex.pot:null, s1:ex?ex.share[i1]:null, s2:ex?ex.share[i2]:null,
             clock:clockMs(m,now,offset), closed:!!m.closed, stale:!m.closed&&age>STALE_MS,
@@ -23880,7 +23896,7 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
   function offsetNow(){ return offsetOf(offsets); }
 
   // ── the price block, rewritten in place ──
-  let raf=0, potShown=null, lastVerdict=null, dropUntil=0;
+  let raf=0, slowT=0, potShown=null, lastVerdict=null, dropUntil=0;
   function set(el,txt){ if(el&&el.textContent!==txt)el.textContent=txt; }
   function paint(){
     raf=0;
@@ -23944,14 +23960,18 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
       }
       set(q('note'),
         v.closed ? ('Betting closed at '+v.a.toFixed(1)+' and '+v.b.toFixed(1)+
-                    ' — the race is counted on these. '+(v.pass?'Both cleared the floor.':'Under '+lo.toFixed(1)+', so it is not counted.'))
+                    ' — the race is counted on these. '+(v.pass?'Both cleared their bars.':'Not counted: '+v.why+'.'))
         : v.stale ? ('No reading for '+(v.age/1000).toFixed(1)+'s — is Chamet still on screen?')
-        : dropping ? ('The price just dropped under '+lo.toFixed(1)+' — this is no longer a bet.')
+        : dropping ? ('The price just moved — '+v.why+' — this is no longer a bet.')
         : v.knife ? ('Right on the floor ('+Math.min(v.x1,v.x2).toFixed(2)+') — one late bet can push it under '+lo.toFixed(1)+'.')
-        : ((v.pass?'Both pay enough. ':'Too short — the lower is under '+lo.toFixed(1)+'. ')+
+        : ((v.pass?'Both pay enough. ':'Too short — '+v.why+'. ')+
            'A split returns '+v.ret.toFixed(2)+'× if either wins. Read '+Math.max(0,Math.round(v.age))+'ms ago.'));
-      // keep the clock running while betting is open and the reading is live
-      if(!v.closed&&v.clock&&v.clock.ms>0&&v.age<60000)again=true;
+      // keep the clock running while betting is open and the reading is live;
+      // once it has run down or gone stale, a slow timer is enough to say so -
+      // never 60 frames a second for a clock that is not moving
+      if(!v.closed&&v.clock&&v.clock.ms>0&&!v.stale)again=true;
+      else if(!v.closed&&v.age<60000&&!slowT)
+        slowT=setTimeout(function(){ slowT=0; kick(); },v.stale?1000:Math.max(50,STALE_MS-v.age+20));
     }catch(e){}
     if(again)kick();
   }
@@ -24208,6 +24228,29 @@ test('The clock runs in milliseconds between readings and never disagrees with a
   const c=L.clockMs({secs:1,tickAt:T,readAt:T,closed:true},T,0);
   assert(c.closed&&c.ms===0&&L.clockText(c)==='CLOSED');
   assert.strictEqual(L.clockMs({secs:-1},T,0),null);
+});
+
+test('A close this phone has seen run late is counted all the way down to 0, not frozen above it',()=>{
+  const x=liveEnv(),L=x.RXALive,T=x._clock;
+  const m={secs:1,tickAt:T,readAt:T};
+  // learned: Chamet shuts 200ms after the digit says
+  assert.strictEqual(L.clockMs(m,T+900,200).ms,300);
+  assert.strictEqual(L.clockMs(m,T+1150,200).ms,50,'past the digit, still running down');
+  assert.strictEqual(L.clockMs(m,T+1200,200).ms,0,'and at 0 exactly when the close is due');
+  // and one that shuts early reaches 0 early
+  assert.strictEqual(L.clockMs(m,T+800,-200).ms,0);
+  // a fresh "4s" is still held inside its own second whatever the offset
+  const f={secs:4,tickAt:T-1500,readAt:T};
+  assert(L.clockMs(f,T,0).board>=3000&&L.clockMs(f,T,0).board<=4000);
+});
+
+test('A pair that fails says which bar it failed - the floor on the shorter, or the bar on the longer',()=>{
+  const x=liveEnv(),L=x.RXALive,T=x._clock;
+  const m=(o1,o2)=>({cars:['SUV','ORV','Car'],odds:[o1+'/2.7',o2+'/2.5','9.0/2.5'],bets:['50','35','15'],secs:2,tickAt:T,readAt:T});
+  const hiFail=L.view(m('1.8','2.6'),3,2,T,0,1.7,2.7);
+  assert(!hiFail.pass&&hiFail.why==='the higher is under 2.7','1.8 and 2.6 fail the 2.7 bar, not the 1.7 floor');
+  const loFail=L.view(m('1.6','2.9'),3,2,T,0,1.7,2.7);
+  assert(!loFail.pass&&loFail.why==='the lower is under 1.7');
 });
 
 test('Observed closes teach the clock how early or late Chamet really shuts',()=>{

@@ -1,14 +1,18 @@
 name: Build Race x AI Bot APK
 
-# Two files make this app: this workflow, and race-x-ai/index.html (the app
-# itself). They are separate because GitHub refuses to start a run for any
-# workflow file over 500 KB, and index.html alone is well over that.
+# Two files make this app: this workflow, and index.html (the app itself).
+# They are separate because GitHub refuses to start a run for any workflow file
+# over 500 KB, and index.html alone is well over that.
 #
 # Everything else - the Android project, the Java, the Gradle config - is written
 # out below, and the icons are generated from the logo already inside index.html.
 #
-# The app lives in race-x-ai/ so it can share this repo with the Lucky Number
-# Tracker at the root without either build picking up the other's index.html.
+# WHERE index.html GOES. Either works:
+#   race-x-ai/index.html  - for a repo shared with another app at the root
+#                           (Lucky-28 keeps the Lucky Number Tracker there)
+#   index.html            - at the root of a repo of its own, uploaded next to
+#                           this workflow the way it always was
+# The first step finds it; when both exist, race-x-ai/ wins.
 #
 # ── NOTHING SECRET IS IN THIS REPO, BECAUSE THE REPO IS PUBLIC ──
 #
@@ -23,7 +27,8 @@ name: Build Race x AI Bot APK
 #                      deletes every logged race. Set it before installing.
 on:
   push:
-    paths: [ 'race-x-ai/**', '.github/workflows/race-x-ai.yml' ]
+    # a new app or a new workflow - whichever name the workflow was saved under
+    paths: [ 'index.html', 'Race_x_Ai_bot.html', 'race-x-ai/**', '.github/workflows/**' ]
   workflow_dispatch:
 
 permissions:
@@ -38,6 +43,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # ── FIND THE APP ──
+      #
+      # Every step below runs inside race-x-ai/. This one runs at the root (so it
+      # works before that folder exists) and makes sure the app is in it: as
+      # committed there, or copied in from the root of the repo. A root
+      # index.html is only taken if it is THIS app - in a repo shared with
+      # another one, the other app's page must never be built as this one.
+      - name: Find the app
+        working-directory: .
+        run: |
+          if [ -f race-x-ai/index.html ]; then
+            echo "Using race-x-ai/index.html"
+            exit 0
+          fi
+          for f in index.html Race_x_Ai_bot.html; do
+            if [ -f "$f" ] && grep -q 'id="rxa-accuracy-tests"' "$f"; then
+              mkdir -p race-x-ai
+              cp "$f" race-x-ai/index.html
+              echo "Using $f from the root of the repo"
+              exit 0
+            fi
+          done
+          if [ -f index.html ]; then
+            echo "::error::index.html at the root of the repo is not the Race x AI Bot app (its built-in checks are missing). Upload the Race x AI index.html, at the root or in race-x-ai/."
+          else
+            echo "::error::No index.html found. Upload the Race x AI index.html next to this workflow, at the root of the repo or in race-x-ai/."
+          fi
+          exit 1
 
       - name: Verify prediction, recovery, and migration invariants
         run: |

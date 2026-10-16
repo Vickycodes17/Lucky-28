@@ -266,13 +266,18 @@ jobs:
           ___RXA_EOF___
           cat > app/src/main/res/xml/watch_config.xml <<'___RXA_EOF___'
           <?xml version="1.0" encoding="utf-8"?>
+          <!-- notificationTimeout was 300: Android held every event back 300ms before
+               delivering it, so each price change reached the reader at least that
+               late, and the last one before the close often not until the board had
+               already gone. 0 delivers them as they happen. The reader paces itself
+               (ReadPacer), so this no longer decides how often the screen is read. -->
           <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
               android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
               android:accessibilityFeedbackType="feedbackGeneric"
               android:accessibilityFlags="flagReportViewIds|flagIncludeNotImportantViews|flagRetrieveInteractiveWindows"
               android:canRetrieveWindowContent="true"
               android:canTakeScreenshot="true"
-              android:notificationTimeout="300"
+              android:notificationTimeout="0"
               android:description="@string/watch_desc" />
           ___RXA_EOF___
           cat > app/src/main/java/com/racexai/bot/MainActivity.java <<'___RXA_EOF___'
@@ -394,6 +399,41 @@ jobs:
                       @Override public void run() {
                           try { w.evaluateJavascript(code, back); }
                           catch (Exception e) { if (back != null) back.onReceiveValue("null"); }
+                      }
+                  });
+              }
+
+              /**
+               * Run a line of JS, but if an earlier call in the same `slot` has not run
+               * yet, replace it instead of queueing behind it.
+               *
+               * For readings that only matter at their newest: the market is read many
+               * times a second now, and a page busy drawing for 200ms would otherwise be
+               * handed every reading it missed, in order, each one older than the last
+               * thing on Chamet's screen. One is ever on its way; it carries the latest.
+               * It still runs in its place in the queue, so a board filled before it is
+               * always filled before the price that belongs to it arrives.
+               */
+              private static final java.util.concurrent.ConcurrentHashMap<String, String> sLatest =
+                  new java.util.concurrent.ConcurrentHashMap<>();
+              private static final java.util.concurrent.ConcurrentHashMap<String, Long> sLatestPosted =
+                  new java.util.concurrent.ConcurrentHashMap<>();
+              static void jsLatest(final String slot, final String code) {
+                  final WebView w = sWeb;
+                  if (w == null) { sJsDropped++; return; }
+                  final long now = android.os.SystemClock.uptimeMillis();
+                  if (sLatest.put(slot, code) != null) {
+                      // one already on its way, and it will carry this - unless it was
+                      // posted to a page that has since gone and is never going to run
+                      Long at = sLatestPosted.get(slot);
+                      if (at != null && now - at < 1500) return;
+                  }
+                  sLatestPosted.put(slot, now);
+                  w.post(new Runnable() {
+                      @Override public void run() {
+                          String c = sLatest.remove(slot);
+                          if (c == null) return;
+                          try { w.evaluateJavascript(c, null); } catch (Exception ignored) { }
                       }
                   });
               }
@@ -2058,7 +2098,7 @@ jobs:
           "      // exactly as it always did.\n" +
           "      // Which three vehicles this board is, so a price reading arriving a\n" +
           "      // moment later can be checked against it rather than assumed to belong.\n" +
-          "      try { window.__lastFillCars = (cars || []).slice(); window.__liveMarket = null; } catch (e) { }\n" +
+          "      try { window.__lastFillCars = (cars || []).slice(); window.__liveMarket = null; window.__closeMarket = null; } catch (e) { }\n" +
           "      // and the trail of how the last board's money formed starts over\n" +
           "      try { if (typeof window.rxaBoardReset === 'function') window.rxaBoardReset(); } catch (e) { }\n" +
           "      var run = function () { return fillNow(cars, road, slot); };\n" +
@@ -2129,11 +2169,17 @@ jobs:
           "     *\n" +
           "     * Called repeatedly within one board now, whenever the prices move.\n" +
           "     */\n" +
-          "    meta: function (odds, bets, signs, secs) {\n" +
+          "    meta: function (odds, bets, signs, secs, readAt, tickAt) {\n" +
           "      try {\n" +
           "        window.__raceMeta = { odds: odds || null, bets: bets || null, signs: signs || null };\n" +
           "        // the seconds left on the board, or null when the watcher could not read them\n" +
           "        var left = (typeof secs === 'number' && isFinite(secs) && secs >= 0) ? secs : null;\n" +
+          "        // WHEN THE SCREEN WAS READ, not when this line got to run. The page can\n" +
+          "        // be busy drawing for a fifth of a second, and a price stamped on\n" +
+          "        // arrival would claim to be younger than it is. An older reader sends\n" +
+          "        // no time at all, and then arrival is the best there is.\n" +
+          "        var read = (typeof readAt === 'number' && readAt > 0) ? readAt : Date.now();\n" +
+          "        var tick = (typeof tickAt === 'number' && tickAt > 0) ? tickAt : null;\n" +
           "        // ── AND A COPY THAT SURVIVES THE BETTING WINDOW ──\n" +
           "        //\n" +
           "        // __raceMeta is consumed and cleared when the race is logged, which\n" +
@@ -2146,15 +2192,57 @@ jobs:
           "          var cars = (window.__lastFillCars || null);\n" +
           "          if (cars && cars.length === 3 && odds && odds.length === 3) {\n" +
           "            window.__liveMarket = { cars: cars.slice(), odds: odds.slice(),\n" +
-          "                                    bets: (bets || []).slice(), secs: left, at: Date.now() };\n" +
+          "                                    bets: (bets || []).slice(), secs: left, at: read,\n" +
+          "                                    readAt: read, tickAt: tick, gotAt: Date.now() };\n" +
           "          }\n" +
           "        } catch (e) { }\n" +
+          "        // A reading after a close means betting was not over after all: the\n" +
+          "        // close was a frame that caught the board mid-redraw. Forget it; the\n" +
+          "        // real one will come.\n" +
+          "        try { if (window.__closeMarket) window.__closeMarket = null; } catch (e) { }\n" +
           "        // The money panel prices off these. Parking them without a word\n" +
           "        // would leave it showing the first quote of the board for the whole\n" +
           "        // betting window, which is the thing this call now repeats to fix.\n" +
           "        try { if (window.rxaOddsChanged) window.rxaOddsChanged(); } catch (e) { }\n" +
           "        if (signs && signs.length) note('signs', signs.join('  |  '));\n" +
           "        if (odds && odds.length) note('odds', (left != null ? left + 's  ' : '') + odds.join('  '));\n" +
+          "        return 'ok';\n" +
+          "      } catch (e) { return 'error ' + e; }\n" +
+          "    },\n" +
+          "\n" +
+          "    /**\n" +
+          "     * Betting has closed, and this is the market it closed on.\n" +
+          "     *\n" +
+          "     * The race used to be priced off whatever the last open frame happened to\n" +
+          "     * be - one second before the close on 95% of races - and Chamet goes on\n" +
+          "     * repricing right up to it, so a pick reading 1.7 could close at 1.6 and be\n" +
+          "     * counted at a price nobody could get. This is the price it actually shut\n" +
+          "     * at: the closing frame's own numbers when it still showed them, otherwise\n" +
+          "     * the last frame read while it was open - read as close to the close as the\n" +
+          "     * phone allows. It is attached to the race when the race is logged.\n" +
+          "     */\n" +
+          "    closed: function (odds, bets, secs, lastOpenAt, closedAt, fromFrame) {\n" +
+          "      try {\n" +
+          "        var cars = window.__lastFillCars || null;\n" +
+          "        if (!cars || cars.length !== 3 || !odds || odds.length !== 3) return 'no board';\n" +
+          "        var c = { cars: cars.slice(), odds: odds.slice(), bets: (bets || []).slice(),\n" +
+          "                  secs: (typeof secs === 'number' && isFinite(secs) && secs >= 0) ? secs : null,\n" +
+          "                  lastOpenAt: (lastOpenAt > 0) ? lastOpenAt : null,\n" +
+          "                  closedAt: (closedAt > 0) ? closedAt : Date.now(),\n" +
+          "                  src: fromFrame ? 'closing-frame' : 'last-open-frame', gotAt: Date.now() };\n" +
+          "        window.__closeMarket = c;\n" +
+          "        // The live panel shows the closing market from here on, and says so.\n" +
+          "        try {\n" +
+          "          var m = window.__liveMarket;\n" +
+          "          if (m && m.cars && m.cars.join('|') === c.cars.join('|')) {\n" +
+          "            if (fromFrame) { m.odds = c.odds.slice(); m.bets = c.bets.slice(); }\n" +
+          "            m.closed = true; m.closedAt = c.closedAt;\n" +
+          "          }\n" +
+          "        } catch (e) { }\n" +
+          "        try { if (window.rxaOddsChanged) window.rxaOddsChanged(); } catch (e) { }\n" +
+          "        try { if (window.rxaMarketClosed) window.rxaMarketClosed(c); } catch (e) { }\n" +
+          "        note('close', odds.join('  ') + '  (' + c.src + ', '\n" +
+          "             + (c.lastOpenAt ? (c.closedAt - c.lastOpenAt) + 'ms after the last open read' : 'no open read') + ')');\n" +
           "        return 'ok';\n" +
           "      } catch (e) { return 'error ' + e; }\n" +
           "    },\n" +
@@ -3725,6 +3813,135 @@ jobs:
               }
           }
           ___RXA_EOF___
+          cat > app/src/main/java/com/racexai/bot/ReadPacer.java <<'___RXA_EOF___'
+          package com.racexai.bot;
+
+          /**
+           * WHEN TO LOOK AT THE SCREEN NEXT. No Android imports, so it is checked on a
+           * desktop like the rest of the reader.
+           *
+           * The reader used to look at most once every 600ms, and only when an
+           * accessibility event happened to wake it - an event arriving inside those
+           * 600ms was simply thrown away, with nothing booked for later. So the last
+           * change before the board closed was missed whenever it landed in the gap, and
+           * that is exactly when Chamet moves the prices most: the history has the final
+           * reading at "1s" on 95% of races and at "0s" on none, while a quarter of the
+           * money lands in the last three seconds.
+           *
+           * Three rules replace it:
+           *
+           *   NOTHING ASKED FOR IS DROPPED. A request inside the gap is booked for the
+           *            end of the gap, so the last change before a quiet spell is
+           *            always read.
+           *   AN OPEN BOARD IS WATCHED, NOT WAITED FOR. While betting is open the
+           *            reader polls on its own every OPEN_GAP, and every FINAL_GAP in
+           *            the last FINAL_SECS, events or no events.
+           *   NEVER FASTER THAN THE PHONE. The gap is never shorter than one pass
+           *            takes (half of one, in the final seconds), so a slow phone gets
+           *            a slower reader rather than a reader that never lets go.
+           *
+           * Away from a board it backs off exactly as before, so a Chamet party with no
+           * race costs what it always cost.
+           */
+          final class ReadPacer {
+
+              static final long OPEN_GAP = 80;       // betting open, more than FINAL_SECS left
+              static final long FINAL_GAP = 25;      // the last seconds: as close to the close as the phone allows
+              static final int FINAL_SECS = 5;
+              static final long AFTER_GAP = 300;     // a race is running or its result is up
+              static final long AFTER_BEAT = 600;    // ...and with no events, still look this often
+              static final long AFTER_HOLD = 30000;  // how long "a board was here" keeps the pace up
+              static final long IDLE_MIN = 600, IDLE_MAX = 2500, IDLE_STEP = 400;
+              /** a fast read only refreshes the board's own views; look at everything this often too */
+              static final long FULL_EVERY = 400;
+
+              private long lastStart = Long.MIN_VALUE / 4;
+              private long lastFull = Long.MIN_VALUE / 4;
+              private long lastBoard = Long.MIN_VALUE / 4;
+              private long passMs = 0;
+              private long idleGap = IDLE_MIN;
+              private boolean open = false;
+              private int secs = -1;
+
+              // for the diagnostic
+              private int fastReads = 0, fullReads = 0;
+              private long windowStart = 0;
+              private int windowReads = 0;
+              private double readsPerSec = 0;
+
+              /** A read is starting now. */
+              synchronized void started(long now) {
+                  lastStart = now;
+                  if (now - windowStart >= 2000) {
+                      readsPerSec = windowReads * 1000.0 / Math.max(1, now - windowStart);
+                      windowStart = now; windowReads = 0;
+                  }
+                  windowReads++;
+              }
+
+              /**
+               * A read has finished.
+               *
+               * @param took        how long it took
+               * @param full        it looked at every window, not only the board
+               * @param boardSeen   a Lucky Race board was on screen
+               * @param bettingOpen and betting on it is open
+               * @param secsLeft    seconds left on it, -1 if not known
+               */
+              synchronized void done(long now, long took, boolean full, boolean boardSeen,
+                                     boolean bettingOpen, int secsLeft) {
+                  // a smoothed pass time, so one slow pass does not halve the pace for good
+                  passMs = passMs == 0 ? took : (passMs * 3 + took) / 4;
+                  if (full) { lastFull = now; fullReads++; } else fastReads++;
+                  if (boardSeen || bettingOpen) { lastBoard = now; idleGap = IDLE_MIN; }
+                  else if (full && now - lastBoard >= AFTER_HOLD) idleGap = Math.min(IDLE_MAX, idleGap + IDLE_STEP);
+                  open = bettingOpen;
+                  secs = bettingOpen ? secsLeft : -1;
+              }
+
+              synchronized boolean bettingOpen() { return open; }
+              private boolean finalStretch() { return open && secs >= 0 && secs <= FINAL_SECS; }
+
+              /** The shortest time between the starts of two reads, as things stand. */
+              synchronized long gap(long now) {
+                  if (open) {
+                      if (finalStretch()) return Math.max(FINAL_GAP, passMs / 2);
+                      return Math.max(OPEN_GAP, passMs);
+                  }
+                  if (now - lastBoard < AFTER_HOLD) return Math.max(AFTER_GAP, passMs);
+                  return idleGap;
+              }
+
+              /**
+               * How long from `now` until the next read should start, or -1 for "not
+               * until something asks". `asked` is an accessibility event or a button;
+               * without one this is the heartbeat - which only an open board, or one
+               * seen in the last AFTER_HOLD, has at all.
+               */
+              synchronized long delay(long now, boolean asked) {
+                  long g;
+                  if (asked) g = gap(now);
+                  else if (open) g = gap(now);
+                  else if (now - lastBoard < AFTER_HOLD) g = Math.max(AFTER_BEAT, passMs);
+                  else return -1;
+                  return Math.max(0, lastStart + g - now);
+              }
+
+              /**
+               * Should this read walk every window? Always, unless betting is open, the
+               * board's views are in hand, and everything was looked at recently.
+               */
+              synchronized boolean fullDue(long now, boolean fastReady) {
+                  return !(open && fastReady) || now - lastFull >= FULL_EVERY;
+              }
+
+              synchronized String describe(long now) {
+                  return (open ? (finalStretch() ? "final seconds" : "betting open") : "watching")
+                      + ", every " + gap(now) + "ms, " + Math.round(readsPerSec) + " reads/s"
+                      + ", pass " + passMs + "ms, " + fastReads + " fast / " + fullReads + " full";
+              }
+          }
+          ___RXA_EOF___
           cat > app/src/main/java/com/racexai/bot/RaceWatcher.java <<'___RXA_EOF___'
           package com.racexai.bot;
 
@@ -3760,7 +3977,27 @@ jobs:
                    * behind that placeholder decides whether ~94% is reachable or ~80% is
                    * the ceiling - a question worth answering from data.
                    */
-                  void raceMeta(List<String> odds, List<String> bets, List<String> signs, String countdown);
+                  void raceMeta(List<String> odds, List<String> bets, List<String> signs, String countdown,
+                                long readAt, long tickAt);
+                  /**
+                   * Betting on this board has closed, and this is the market it closed on.
+                   *
+                   * The last reading before the board shut used to be the only one the
+                   * app ever got, and it came from whichever frame happened to be read
+                   * last - one second out on 95% of races, two on the rest. Chamet keeps
+                   * repricing right up to the close, so a pick reading 1.7 at "1s" could
+                   * close at 1.6, and the race was then counted at a price nobody could
+                   * get. This hands over the market as it stood at the close itself:
+                   *
+                   *   odds/bets   the closing frame's own numbers when it still showed
+                   *               them (fromClosingFrame), otherwise the last open frame
+                   *   secs        the countdown on that frame
+                   *   lastOpenAt  when the board was last seen open (wall clock, ms)
+                   *   closedAt    when it was first seen shut - the close happened in
+                   *               between, so the gap is how sure this is
+                   */
+                  void marketClosed(List<String> odds, List<String> bets, int secs,
+                                    long lastOpenAt, long closedAt, boolean fromClosingFrame);
                   /**
                    * The two surfaces the board kept back, once the race has started and
                    * they are finally drawn. They arrive far too late to bet on - the point
@@ -3804,7 +4041,30 @@ jobs:
               private String hidA, hidB;   // the two surfaces, once the race reveals them
               private int filledSlot = -1; // which track was revealed on the board we filled
               private List<String> sentOdds; // the prices last handed to the app, to spot a move
+              private List<String> sentBets; // and the stake per vehicle, which moves far more often
               private String sentClock;      // and the countdown, which moves once a second
+              private List<String> filledCars; // the three vehicles of the board in the app
+
+              // ── THE LAST OPEN FRAME, KEPT FOR THE CLOSE ──
+              private List<String> openOdds, openBets;
+              private String openClock;
+              private long openAt = 0;
+              /** the close for this board has been handed over */
+              private boolean closeSent = false;
+              /** when a frame first suggested the board had gone, waiting for a second to agree */
+              private long closeSeenAt = 0;
+
+              // ── WHEN THE SECOND ACTUALLY TICKED ──
+              //
+              // The board only prints whole seconds, so a reading taken at "5s" could be
+              // anywhere in that second. Reading fast enough to see the digit change
+              // pins it down: the tick happened between the last frame showing 6 and the
+              // first showing 5. The midpoint of those two reads is the tick, to within
+              // half the gap between them, and from it the app can run a countdown that
+              // moves smoothly in milliseconds and still agrees with the board.
+              private int clockSecs = -1;
+              private long clockSeenAt = 0;
+              private long tickAt = 0;
               private boolean probed;      // this race has already been reported on
               private String rankKey;      // the Win Rate Rank table already handed over
               private String rankWhy = "";  // and the last reason one could not be read
@@ -3836,7 +4096,24 @@ jobs:
                */
               public void forgetRank() { rankKey = null; rankWhy = ""; wantRank = true; }
 
-              public void feed(String dump) {
+              public void feed(String dump) { feed(dump, System.currentTimeMillis()); }
+
+              /** Readings of the market this watcher has handed over, for the diagnostic. */
+              private int metaSent = 0, closes = 0;
+              public int metaCount() { return metaSent; }
+              public int closeCount() { return closes; }
+
+              /** Is a board open for betting right now? The reader polls fast while it is. */
+              public boolean bettingOpen() { return armed && !closeSent && openAt > 0; }
+              /** Seconds left on the open board as last read, or -1. */
+              public int secondsLeft() { return bettingOpen() ? clockSecs : -1; }
+
+              /**
+               * One frame, and the wall-clock time it was read at - the moment the screen
+               * was looked at, not the moment this got round to it, so every reading the
+               * app is given can say exactly how old it is.
+               */
+              public void feed(String dump, long readAt) {
                   // ── the Win Rate Rank screen ──
                   //
                   // Checked before the board, and cheaply: the betting board names
@@ -3892,7 +4169,14 @@ jobs:
                   // before ever calling it, because that build does not happen to name a
                   // view race_game_bg. Cheap ids first, then the real test.
                   boolean quick = dump.indexOf("race_game_bg") >= 0 || dump.indexOf("gameBetView") >= 0;
-                  if (!quick && !RaceReader.looksLikeBoard(dump)) return;
+                  if (!quick && !RaceReader.looksLikeBoard(dump)) {
+                      // NO BOARD AT ALL. Once a race has started that is the normal state
+                      // of the screen, and it means betting has closed - but one empty
+                      // frame can also be a walk that came back short, so it takes two in
+                      // a row to say so. The close is still stamped at the FIRST of them.
+                      boardGone(readAt, false);
+                      return;
+                  }
 
                   RaceReader.Frame f = RaceReader.parse(dump);
 
@@ -3900,6 +4184,10 @@ jobs:
                       if (f.cars.size() != 3 || f.road == null || f.slot < 1) return;   // half-drawn
                       String key = f.cars.toString() + "|" + f.road + "|" + f.slot;
                       if (key.equals(filledKey)) {
+                          // a frame that thought the board had gone was wrong
+                          closeSeenAt = 0;
+                          if (closeSent) closeSent = false;   // betting came back: the close was early
+                          noteClock(f.countdown, readAt);
                           // ── THE BOARD IS THE SAME ONE. THE PRICES ON IT ARE NOT. ──
                           //
                           // This returned here on every frame after the first, which was
@@ -3922,30 +4210,69 @@ jobs:
                           // clock ran down to eight. One reading a second, at most, and
                           // each one carries the stake as it stands - which is also what
                           // lets the race record how the money formed.
+                          //
+                          // THE STAKE COUNTS TOO. This only ever compared the prices and the
+                          // clock, so money landing between two of them - which is most of
+                          // it in the last seconds - waited for the next price change or the
+                          // next second to be seen at all. The pool is what the prices are
+                          // made of; a pool that moved is a reading worth sending.
                           boolean priceMoved = !f.odds.equals(sentOdds);
+                          boolean moneyMoved = !f.bets.equals(sentBets);
                           boolean clockMoved = f.countdown != null && !f.countdown.equals(sentClock);
                           // never on a half-drawn frame with no prices: an empty set would
                           // overwrite the last good reading the race is logged with
-                          boolean havePrices = false;
-                          for (String x : f.odds) if (x != null && x.trim().length() > 0) havePrices = true;
-                          if (havePrices && (priceMoved || clockMoved)) {
+                          boolean havePrices = havePrices(f);
+                          if (havePrices) keepOpen(f, readAt);
+                          if (havePrices && (priceMoved || moneyMoved || clockMoved)) {
                               sentOdds = new ArrayList<>(f.odds);
+                              sentBets = new ArrayList<>(f.bets);
                               sentClock = f.countdown;
-                              listener.raceMeta(f.odds, f.bets, f.signs, f.countdown);
+                              metaSent++;
+                              listener.raceMeta(f.odds, f.bets, f.signs, f.countdown, readAt, tickAt);
                           }
                           return;
                       }
                       filledKey = key;
+                      filledCars = new ArrayList<>(f.cars);
                       armed = true;
                       filled++;
                       hidA = hidB = null;                                // new race, forget the last one
                       filledSlot = f.slot;
                       probed = false;
+                      closeSent = false; closeSeenAt = 0;
+                      openOdds = openBets = null; openClock = null; openAt = 0;
+                      clockSecs = -1; clockSeenAt = 0; tickAt = 0;
+                      noteClock(f.countdown, readAt);
+                      if (havePrices(f)) keepOpen(f, readAt);
                       sentOdds = new ArrayList<>(f.odds);
+                      sentBets = new ArrayList<>(f.bets);
                       sentClock = f.countdown;
                       listener.fillAndSpeak(f.cars, f.road, f.slot);
-                      listener.raceMeta(f.odds, f.bets, f.signs, f.countdown);
+                      metaSent++;
+                      listener.raceMeta(f.odds, f.bets, f.signs, f.countdown, readAt, tickAt);
                       return;
+                  }
+
+                  // ── BETTING HAS CLOSED ON THIS FRAME ──
+                  //
+                  // The board is still drawn but its betting panel has folded away, or the
+                  // result is up. Either says the close has happened, so no second frame
+                  // is needed. If the frame still carries all three prices for the same
+                  // three vehicles, those ARE the closing prices and are fresher than
+                  // anything read while it was open.
+                  //
+                  // Only the folded panel itself, or the result, is taken at its word. A
+                  // build read by the vehicle names has no panel to ask, and there a
+                  // frame that caught two of the three cars mid-redraw looks "not open"
+                  // too - so it needs a second frame to agree, like an empty one does.
+                  if (armed && !closeSent && openAt > 0) {
+                      boolean sure = f.winner != null || dump.indexOf("gameBetView") >= 0;
+                      boolean same = filledCars != null && filledCars.equals(f.cars);
+                      if (sure && same && havePrices(f)) {
+                          sendClose(f.odds, f.bets, f.countdown, closeSeenAt > 0 ? closeSeenAt : readAt, true);
+                      } else {
+                          boardGone(readAt, sure);
+                      }
                   }
 
                   // Racing. Report what is on screen, once, so it can be established from
@@ -3981,13 +4308,65 @@ jobs:
 
                   // racing or showing the result
                   if (f.winner != null && armed) {
+                      // the close goes first, so the race is logged carrying it
+                      if (!closeSent && openAt > 0) boardGone(readAt, true);
                       armed = false;
                       filledKey = null;      // next board fills even if it is the same three cars
+                      filledCars = null;
                       sentOdds = null;       // and its prices are a fresh set, not a continuation
+                      sentBets = null;
                       sentClock = null;
+                      openAt = 0; closeSeenAt = 0;
                       logged++;
                       listener.logWinner(f.winner);
                   }
+              }
+
+              private static boolean havePrices(RaceReader.Frame f) {
+                  if (f.odds.size() != 3) return false;
+                  for (String x : f.odds) if (x == null || x.trim().length() == 0) return false;
+                  return true;
+              }
+
+              private void keepOpen(RaceReader.Frame f, long readAt) {
+                  openOdds = new ArrayList<>(f.odds);
+                  openBets = new ArrayList<>(f.bets);
+                  openClock = f.countdown;
+                  openAt = readAt;
+              }
+
+              /**
+               * The board has gone, or folded. `sure` when the frame itself says betting
+               * is over; otherwise a second frame has to agree before the close is sent,
+               * and the close is dated to the first one either way.
+               */
+              private void boardGone(long readAt, boolean sure) {
+                  if (!armed || closeSent || openAt <= 0) return;
+                  if (closeSeenAt == 0) closeSeenAt = readAt;
+                  if (!sure && readAt == closeSeenAt) return;      // one frame is not enough
+                  sendClose(openOdds, openBets, openClock, closeSeenAt, false);
+              }
+
+              private void sendClose(List<String> odds, List<String> bets, String clock,
+                                     long closedAt, boolean fromFrame) {
+                  closeSent = true;
+                  closes++;
+                  listener.marketClosed(odds, bets, RaceReader.seconds(clock), openAt, closedAt, fromFrame);
+              }
+
+              /** Track the countdown digit, and the moment it last changed. */
+              private void noteClock(String countdown, long readAt) {
+                  int s = RaceReader.seconds(countdown);
+                  if (s < 0) return;
+                  if (s != clockSecs) {
+                      // one second down, seen promptly: the tick is between the two reads
+                      if (clockSecs == s + 1 && clockSeenAt > 0 && readAt - clockSeenAt <= 1500)
+                          tickAt = clockSeenAt + (readAt - clockSeenAt) / 2;
+                      else
+                          tickAt = 0;          // a jump, or the first look - no honest tick to give
+                      clockSecs = s;
+                  }
+                  clockSeenAt = readAt;
               }
           }
           ___RXA_EOF___
@@ -4022,27 +4401,16 @@ jobs:
           public class WatchService extends AccessibilityService implements RaceWatcher.Listener {
 
               /**
-               * HOW OFTEN TO READ THE SCREEN, and why it is not one number.
-               *
-               * 600ms is right while a board is on screen: the countdown is short and a
-               * race must not be missed. It is badly wrong the rest of the time. A Chamet
-               * party runs for hours with no board at all, and re-reading that whole screen
-               * twice a second for nothing is what made the phone stick.
-               *
-               * So it backs off. Every pass that finds no board pushes the gap up; the
-               * moment a board appears it snaps straight back to 600ms and stays there.
-               * Sitting in a party costs one read every 2.5 seconds instead of nearly two
-               * a second. The ceiling is deliberately well inside a betting window, so the
-               * worst case is noticing a board a couple of seconds late rather than
-               * missing one.
+               * HOW OFTEN TO READ THE SCREEN is decided by ReadPacer, which has no Android
+               * in it and is checked on a desktop. In short: an open board is polled on
+               * its own - every 80ms, every 25ms in the last five seconds - and nothing
+               * that asks for a look is ever dropped; with no board about it backs off to
+               * one look every 2.5 seconds, as it always did.
                */
-              private static final long GAP_BUSY = 600;      // a board is about
-              private static final long GAP_IDLE_MAX = 2500; // nothing here for a while
-              private volatile long gap = GAP_BUSY;
+              private final ReadPacer pace = new ReadPacer();
 
               private static WatchService instance;
               private final RaceWatcher watcher = new RaceWatcher(this);
-              private volatile long last = 0;
 
               /**
                * SAVE A PICTURE OF WHAT THE BOT CAN SEE, so a person can look at it.
@@ -4228,16 +4596,19 @@ jobs:
                */
               private android.os.HandlerThread readThread;
               private volatile android.os.Handler reader;
-              /** one pass at a time - a second event while a pass runs is dropped, not queued */
-              private final java.util.concurrent.atomic.AtomicBoolean busy =
-                  new java.util.concurrent.atomic.AtomicBoolean(false);
 
               @Override protected void onServiceConnected() {
                   super.onServiceConnected();
                   instance = this;
                   try {
+                      // FOREGROUND, NOT BACKGROUND. A background-priority thread is put in
+                      // the group Android starves first, and on a phone that is also running
+                      // a video call it could wait whole frames for a turn - every one of
+                      // them a late reading of a price that was moving. The work is small
+                      // and short now (a fast read is a handful of views), so it can afford
+                      // to be on time.
                       readThread = new android.os.HandlerThread("racex-read",
-                          android.os.Process.THREAD_PRIORITY_BACKGROUND);
+                          android.os.Process.THREAD_PRIORITY_FOREGROUND);
                       readThread.start();
                       reader = new android.os.Handler(readThread.getLooper());
                       grabHandler = reader;
@@ -4295,24 +4666,168 @@ jobs:
                       if (gp != null && ep != null && !ep.toString().equals(gp)) return;
                   } catch (Exception ignored) { }
 
-                  long now = SystemClock.elapsedRealtime();
-                  if (now - last < gap) return;
-                  last = now;
+                  // ── NOTHING THAT ASKS IS DROPPED ANY MORE ──
+                  //
+                  // This returned whenever the last look was under 600ms ago, and booked
+                  // nothing for later - so a price that changed just after a look, with no
+                  // event after it, was never seen at all. That is the last second of
+                  // every race: the money lands, the board closes, and the screen goes
+                  // quiet. Now an event inside the gap books a look for the end of it, and
+                  // one that arrives while a look is running books another straight after.
+                  // Events still never queue up: there is only ever one look booked.
+                  request();
+              }
 
+              // ── THE SCHEDULER ── one read running at a time, at most one booked
+              private final Object sched = new Object();
+              private boolean reading = false;      // a read is running on the reader thread
+              private boolean askedAgain = false;   // and something asked for a look while it did
+              private long bookedFor = -1;          // when the next read is booked for (elapsedRealtime)
+
+              private final Runnable readTask = new Runnable() {
+                  @Override public void run() {
+                      synchronized (sched) { bookedFor = -1; reading = true; askedAgain = false; }
+                      try { readOnce(); } catch (Throwable ignored) { }
+                      boolean again;
+                      synchronized (sched) { reading = false; again = askedAgain; askedAgain = false; }
+                      // asked while reading: look again as soon as the pace allows; if not,
+                      // the heartbeat - which only an open board, or one just closed, has
+                      book(again);
+                  }
+              };
+
+              /** Something wants a look at the screen. */
+              private void request() {
+                  if (reader == null) {
+                      // no reader thread: the old way, on the main thread, paced
+                      if (pace.delay(SystemClock.elapsedRealtime(), true) > 0) return;
+                      try { readOnce(); } catch (Throwable ignored) { }
+                      return;
+                  }
+                  book(true);
+              }
+
+              /** Book the next read as soon as the pace allows, unless one is booked sooner. */
+              private void book(boolean asked) {
                   final android.os.Handler h = reader;
-                  if (h == null) { scan(); return; }
-                  // A pass already running means the phone is slower than the pace asks
-                  // for. DROPPING the event is the right answer: queueing them would build
-                  // a backlog of stale screens that can only ever be read late, which is
-                  // how the reader thread would end up permanently behind.
-                  if (!busy.compareAndSet(false, true)) return;
-                  h.post(new Runnable() {
-                      @Override public void run() {
-                          try { scan(); }
-                          catch (Throwable ignored) { }
-                          finally { busy.set(false); }
+                  if (h == null) return;
+                  final long now = SystemClock.elapsedRealtime();
+                  final long d = pace.delay(now, asked);
+                  if (d < 0) return;                       // nothing to watch, and nobody asked
+                  final long at = now + d;
+                  synchronized (sched) {
+                      if (reading) { if (asked) askedAgain = true; return; }
+                      if (bookedFor >= 0 && bookedFor <= at) return;
+                      if (bookedFor >= 0) h.removeCallbacks(readTask);
+                      bookedFor = at;
+                  }
+                  h.postDelayed(readTask, d);
+              }
+
+              /** whether the last full look found a board */
+              private volatile boolean lastFoundBoard = false;
+              private volatile long lastFastMs = 0;
+
+              /**
+               * One look: the board's own views if they are in hand and betting is open,
+               * otherwise every window. The time is taken BEFORE looking, so each reading
+               * the app gets says when the screen was actually read.
+               */
+              private void readOnce() {
+                  final long t0 = SystemClock.elapsedRealtime();
+                  final long wall = System.currentTimeMillis();
+                  pace.started(t0);
+                  boolean full = pace.fullDue(t0, !boardNodes.isEmpty());
+                  if (!full) {
+                      String dump = fastScan();
+                      if (dump == null) {
+                          full = true;                     // a view has gone - the board changed; look at everything
+                      } else {
+                          lastFastMs = SystemClock.elapsedRealtime() - t0;
+                          try { watcher.feed(dump, wall); } catch (Exception ignored) { }
+                          // betting closed on that frame: the board's views are done with
+                          if (!watcher.bettingOpen()) dropBoardNodes();
                       }
-                  });
+                  }
+                  if (full) scan(wall);
+                  final long t1 = SystemClock.elapsedRealtime();
+                  pace.done(t1, t1 - t0, full, full ? lastFoundBoard : true,
+                            watcher.bettingOpen(), watcher.secondsLeft());
+              }
+
+              // ── THE FAST LANE ──
+              //
+              // A full look walks every view in a Chamet party - seats, gifts, members, a
+              // chat that never stops - and the board is a few dozen of them. While betting
+              // is open, only the board matters, and only a handful of its views ever
+              // change: the prices, the stake on each vehicle, the clock, and the panel that
+              // folds away at the close. Those are kept from the last full look and asked
+              // for again, each one fetched fresh from Chamet with refresh(), which also
+              // goes round the system's cache of the tree - so a reading can never be a
+              // stale copy of a number that has already moved.
+              private static final java.util.Set<String> BOARD_IDS = new java.util.HashSet<>(java.util.Arrays.asList(
+                  "race_game_bg", "gameBetView", "cl_track_content", "ll_track_sign", "tv_track_sign",
+                  "tv_race_surplus", "tv_car_name", "tv_car_odds", "tv_totalBet"));
+              private static final java.util.Set<String> MOVING_IDS = new java.util.HashSet<>(java.util.Arrays.asList(
+                  "gameBetView", "tv_race_surplus", "tv_car_odds", "tv_totalBet"));
+              /** the board's views, in walk order, from the last full look that found it open */
+              private final java.util.ArrayList<AccessibilityNodeInfo> boardNodes = new java.util.ArrayList<>();
+              private final java.util.ArrayList<String> boardIds = new java.util.ArrayList<>();
+              /** filled during a full walk */
+              private java.util.ArrayList<AccessibilityNodeInfo> collecting = null;
+              private final java.util.ArrayList<String> collectingIds = new java.util.ArrayList<>();
+
+              private static String shortId(String id) {
+                  if (id == null) return null;
+                  int slash = id.lastIndexOf(":id/");
+                  return slash >= 0 ? id.substring(slash + 4) : id;
+              }
+
+              private void dropBoardNodes() {
+                  for (AccessibilityNodeInfo n : boardNodes) try { n.recycle(); } catch (Throwable ignored) { }
+                  boardNodes.clear(); boardIds.clear();
+              }
+
+              /** The board, re-read from its own views. Null if any of them has gone. */
+              private String fastScan() {
+                  if (boardNodes.isEmpty()) return null;
+                  StringBuilder sb = new StringBuilder(2048);
+                  for (int i = 0; i < boardNodes.size(); i++) {
+                      AccessibilityNodeInfo n = boardNodes.get(i);
+                      String sid = boardIds.get(i);
+                      if (MOVING_IDS.contains(sid)) {
+                          boolean alive;
+                          try { alive = n.refresh(); } catch (Throwable t) { alive = false; }
+                          if (!alive) { dropBoardNodes(); return null; }
+                      }
+                      line(n, n.getViewIdResourceName(), sb);
+                  }
+                  return sb.toString();
+              }
+
+              /**
+               * After a full look: keep the board's views for the fast lane, but only when
+               * betting is open on a board read by its ids - a board found by its words
+               * alone has no ids to find again, so it stays on full looks.
+               */
+              private void keepBoardNodes() {
+                  java.util.ArrayList<AccessibilityNodeInfo> got = collecting;
+                  collecting = null;
+                  if (got == null) return;
+                  int odds = 0, bets = 0, panel = 0;
+                  for (String id : collectingIds) {
+                      if ("tv_car_odds".equals(id)) odds++;
+                      else if ("tv_totalBet".equals(id)) bets++;
+                      else if ("gameBetView".equals(id)) panel++;
+                  }
+                  dropBoardNodes();
+                  if (watcher.bettingOpen() && !RaceReader.byContent && odds == 3 && bets == 3 && panel == 1) {
+                      boardNodes.addAll(got);
+                      boardIds.addAll(collectingIds);
+                  } else {
+                      for (AccessibilityNodeInfo n : got) try { n.recycle(); } catch (Throwable ignored) { }
+                  }
+                  collectingIds.clear();
               }
 
               /** how long the last pass took, so "is it still laggy?" has a number */
@@ -4320,8 +4835,12 @@ jobs:
               private volatile boolean offMain = false;
 
               /** One reading of the screen. Runs on the reader thread, never on the main one. */
-              private void scan() {
+              private void scan() { scan(System.currentTimeMillis()); }
+
+              private void scan(final long wall) {
                   final long t0 = SystemClock.elapsedRealtime();
+                  collecting = new java.util.ArrayList<>();
+                  collectingIds.clear();
                   offMain = (android.os.Looper.myLooper() != android.os.Looper.getMainLooper());
                   StringBuilder sb = new StringBuilder();
                   StringBuilder seen = new StringBuilder();
@@ -4330,7 +4849,7 @@ jobs:
                   winTypes.setLength(0);
                   List<AccessibilityWindowInfo> windows = null;
                   try { windows = getWindows(); } catch (Exception ignored) { }
-                  if (windows == null) return;
+                  if (windows == null) { keepBoardNodes(); return; }
 
                   for (AccessibilityWindowInfo w : windows) {
                       if (w == null) continue;
@@ -4445,10 +4964,8 @@ jobs:
                                      || dump.indexOf("gameBetView") >= 0
                                      || RaceReader.looksLikeBoard(dump);
 
-                  // and the pace follows: fast while there is something to read, slow when
-                  // there is not
-                  if (found) gap = GAP_BUSY;
-                  else if (gap < GAP_IDLE_MAX) gap = Math.min(GAP_IDLE_MAX, gap + 400);
+                  // and the pace follows - ReadPacer is told after this returns
+                  lastFoundBoard = found;
                   // The board proves which app the game is. From here on only that one is
                   // read, which is what makes this affordable again.
                   if (found && gamePkg == null && gamePkgSeen != null) gamePkg = gamePkgSeen;
@@ -4459,8 +4976,9 @@ jobs:
                   try { lastVehicles = RaceReader.vehicleLabels(dump); } catch (Throwable ignored) { }
                   reportSeen(seen.toString(), found, dump);
 
-                  if (dump.length() == 0) return;
-                  try { watcher.feed(dump); } catch (Exception ignored) { }
+                  if (dump.length() == 0) { keepBoardNodes(); return; }
+                  try { watcher.feed(dump, wall); } catch (Exception ignored) { }
+                  keepBoardNodes();
               }
 
               /** was the last screen a game canvas rather than ordinary views? */
@@ -4540,7 +5058,9 @@ jobs:
                   // says in one line whether the reading is the cause: a big number on the
                   // main thread is a frozen screen, the same number off it is not.
                   msg += "   [" + walked + " views in " + windowInfo()
-                       + ", every " + (gap / 100) / 10.0 + "s"
+                       + ", " + pace.describe(SystemClock.elapsedRealtime())
+                       + (lastFastMs > 0 ? ", fast read " + lastFastMs + "ms" : "")
+                       + ", " + watcher.metaCount() + " readings / " + watcher.closeCount() + " closes"
                        + ", " + lastPassMs + "ms " + (offMain ? "off" : "ON") + " main thread"
                        + (found ? (RaceReader.byContent ? ", read by NAMES" : ", read by ids") : "")
                        + (walked >= MAX_NODES ? ", CUT SHORT" : "") + "]";
@@ -4668,14 +5188,14 @@ jobs:
                   // lines by looking for "id=" and a line without one is not read at all.
                   boolean says = (text != null && text.length() > 0)
                               || (desc != null && desc.length() > 0);
-                  if (id != null || says) {
-                      sb.append("* id=").append(id == null ? "-" : id);
-                      if (text != null && text.length() > 0) sb.append(" TEXT=\"").append(text).append('"');
-                      if (desc != null && desc.length() > 0) sb.append(" DESC=\"").append(desc).append('"');
-                      Rect r = new Rect();
-                      n.getBoundsInScreen(r);
-                      sb.append(" [").append(r.left).append(',').append(r.top)
-                        .append('-').append(r.right).append(',').append(r.bottom).append("]\n");
+                  if (id != null || says) line(n, id, sb);
+                  // the board's own views, kept for the fast lane
+                  if (collecting != null && id != null) {
+                      String sid = shortId(id);
+                      if (BOARD_IDS.contains(sid)) {
+                          try { collecting.add(AccessibilityNodeInfo.obtain(n)); collectingIds.add(sid); }
+                          catch (Throwable ignored) { }
+                      }
                   }
                   int kids = n.getChildCount();
                   for (int i = 0; i < kids && walked < MAX_NODES; i++) {
@@ -4683,6 +5203,23 @@ jobs:
                       try { c = n.getChild(i); } catch (Exception ignored) { }
                       if (c != null) { walk(c, sb); try { c.recycle(); } catch (Exception ignored) { } }
                   }
+              }
+
+              /**
+               * One node as one line - the format RaceReader is written and tested against.
+               * Shared by the full walk and the fast lane, so the two can never disagree
+               * about what a view said.
+               */
+              private static void line(AccessibilityNodeInfo n, String id, StringBuilder sb) {
+                  CharSequence text = n.getText();
+                  CharSequence desc = n.getContentDescription();
+                  sb.append("* id=").append(id == null ? "-" : id);
+                  if (text != null && text.length() > 0) sb.append(" TEXT=\"").append(text).append('"');
+                  if (desc != null && desc.length() > 0) sb.append(" DESC=\"").append(desc).append('"');
+                  Rect r = new Rect();
+                  n.getBoundsInScreen(r);
+                  sb.append(" [").append(r.left).append(',').append(r.top)
+                    .append('-').append(r.right).append(',').append(r.bottom).append("]\n");
               }
 
               // ---- what RaceWatcher decided ---------------------------------------
@@ -4696,10 +5233,28 @@ jobs:
                   MainActivity.js("RaceAuto.speak()");
               }
 
+              /**
+               * A reading of the market, with the moment it was read and the moment the
+               * last second ticked.
+               *
+               * LATEST WINS. Readings can now arrive faster than a busy page runs them,
+               * and queueing every one would hand the app a backlog of prices that have
+               * already moved - the very lateness this is here to remove. So only one
+               * reading is ever on its way; a newer one replaces it in the queue.
+               */
               @Override
-              public void raceMeta(List<String> odds, List<String> bets, List<String> signs, String countdown) {
-                  MainActivity.js("RaceAuto.meta(" + arr(odds) + "," + arr(bets) + "," + arr(signs)
-                                + "," + RaceReader.seconds(countdown) + ")");
+              public void raceMeta(List<String> odds, List<String> bets, List<String> signs, String countdown,
+                                   long readAt, long tickAt) {
+                  MainActivity.jsLatest("meta", "RaceAuto.meta(" + arr(odds) + "," + arr(bets) + "," + arr(signs)
+                                + "," + RaceReader.seconds(countdown) + "," + readAt + "," + tickAt + ")");
+              }
+
+              /** The market the board closed on. Never replaced by a later call - it is sent once. */
+              @Override
+              public void marketClosed(List<String> odds, List<String> bets, int secs,
+                                       long lastOpenAt, long closedAt, boolean fromClosingFrame) {
+                  MainActivity.js("RaceAuto.closed(" + arr(odds) + "," + arr(bets) + "," + secs + ","
+                                + lastOpenAt + "," + closedAt + "," + fromClosingFrame + ")");
               }
 
               @Override
@@ -5008,6 +5563,217 @@ jobs:
               }
           }
           ___RXA_EOF___
+          # The board reader, played through whole races on the runner before any
+          # APK is built - see the step that runs it. Not part of the app.
+          mkdir -p desktop-check
+          cat > desktop-check/RaceWatcherCheck.java <<'___RXA_EOF___'
+          package com.racexai.bot;
+
+          import java.util.ArrayList;
+          import java.util.List;
+
+          /**
+           * Plays whole races through RaceWatcher on a desktop, frame by frame, the way
+           * the reader feeds it on a phone - and checks the things that decide whether a
+           * race is priced at the price it really closed on.
+           *
+           * No Android here and nothing to install: javac and java, run by the build
+           * before the APK is made, so a reader that has stopped seeing the close never
+           * reaches a phone.
+           */
+          public class RaceWatcherCheck {
+
+              static int passed = 0;
+              static void check(boolean ok, String what) {
+                  if (!ok) throw new AssertionError("FAIL " + what);
+                  passed++;
+                  System.out.println("PASS " + what);
+              }
+
+              /** Everything the watcher said, in order. */
+              static class Rec implements RaceWatcher.Listener {
+                  final List<String> log = new ArrayList<>();
+                  List<String> lastOdds, lastBets, closeOdds, closeBets;
+                  long lastReadAt, lastTickAt, closeOpenAt, closeAt;
+                  int closeSecs = -99, metas = 0, closesN = 0;
+                  boolean closeFromFrame;
+                  public void fillAndSpeak(List<String> cars, String road, int slot) { log.add("fill " + cars); }
+                  public void raceMeta(List<String> odds, List<String> bets, List<String> signs, String countdown,
+                                       long readAt, long tickAt) {
+                      metas++; lastOdds = odds; lastBets = bets; lastReadAt = readAt; lastTickAt = tickAt;
+                      log.add("meta " + countdown + " " + odds + " " + bets);
+                  }
+                  public void marketClosed(List<String> odds, List<String> bets, int secs,
+                                           long lastOpenAt, long closedAt, boolean fromClosingFrame) {
+                      closesN++; closeOdds = odds; closeBets = bets; closeSecs = secs;
+                      closeOpenAt = lastOpenAt; closeAt = closedAt; closeFromFrame = fromClosingFrame;
+                      log.add("close " + odds);
+                  }
+                  public void hiddenRoads(String a, String b) { }
+                  public void probe(String summary) { }
+                  public void rankTable(String js, int rows, double margin) { }
+                  public void rankFailed(String why, int namesSeen, String screen) { }
+                  public void grabTrack() { log.add("grab"); }
+                  public void logWinner(String winner) { log.add("won " + winner); }
+              }
+
+              static final String P = "* id=com.matemet:id/";
+              static final String[] CARS = { "SUV", "ORV", "Car" };
+
+              /** One frame of the betting board, in the walker's one-line-per-node format. */
+              static String board(boolean open, String clock, String[] odds, String[] bets) {
+                  StringBuilder sb = new StringBuilder();
+                  sb.append(P).append("race_game_bg [0,0-1080,1600]\n");
+                  for (int i = 0; i < 3; i++) sb.append(P).append("cl_track_content [").append(100 + 300 * i).append(",300-").append(380 + 300 * i).append(",500]\n");
+                  sb.append(P).append("ll_track_sign [410,310-500,340]\n");               // the middle track is revealed
+                  for (int i = 0; i < 3; i++)
+                      sb.append(P).append("tv_track_sign TEXT=\"").append(i == 1 ? "Highway" : "???").append("\" [").append(110 + 300 * i).append(",310-200,340]\n");
+                  sb.append(P).append("tv_race_surplus TEXT=\"").append(clock).append("\" [500,200-580,240]\n");
+                  sb.append(P).append("gameBetView [0,900-1080,").append(open ? 1300 : 920).append("]\n");
+                  for (int i = 0; i < 3; i++) {
+                      int x = 100 + 300 * i;
+                      sb.append(P).append("tv_car_name TEXT=\"").append(CARS[i]).append("\" [").append(x).append(",950-").append(x + 200).append(",990]\n");
+                      if (odds != null) sb.append(P).append("tv_car_odds TEXT=\"").append(odds[i]).append("\" [").append(x).append(",1000-").append(x + 200).append(",1040]\n");
+                      if (bets != null) sb.append(P).append("tv_totalBet TEXT=\"").append(bets[i]).append("\" [").append(x).append(",1050-").append(x + 200).append(",1090]\n");
+                  }
+                  return sb.toString();
+              }
+              static String party() { return "* id=com.matemet:id/partySeatChatMaskLayout TEXT=\"hello\" [0,0-1080,1600]\n"; }
+              static String result(String winner) {
+                  return P + "race_game_bg [0,0-1080,1600]\n" + P + "tv_result TEXT=\"" + winner + " won, Next 10 s\" [100,500-900,560]\n";
+              }
+              static String[] o(String a, String b, String c) { return new String[]{ a, b, c }; }
+
+              public static void main(String[] args) {
+                  // ── 1. a race read every 40ms: money-only moves, the tick, the close ──
+                  {
+                      Rec r = new Rec(); RaceWatcher w = new RaceWatcher(r);
+                      long t = 1_000_000L;
+                      // the true tick from 3s to 2s happens at t0+1000; frames every 40ms
+                      long t0 = t;
+                      String[] odds = o("2.0/2.7", "3.0/2.5", "6.0/2.5");
+                      w.feed(board(true, "3s", odds, o("50,000", "33,000", "17,000")), t);
+                      check(r.log.get(0).startsWith("fill"), "a new board fills once");
+                      int before = r.metas;
+                      // the stake moves, the printed prices and the clock do not
+                      w.feed(board(true, "3s", odds, o("50,100", "33,000", "17,000")), t += 40);
+                      check(r.metas == before + 1, "a pool that moved is sent even when no price or second changed");
+                      check(r.lastReadAt == t, "each reading carries the moment the screen was read");
+                      w.feed(board(true, "3s", odds, o("50,100", "33,000", "17,000")), t += 40);
+                      check(r.metas == before + 1, "an identical frame sends nothing");
+                      while (t + 40 < t0 + 1000) w.feed(board(true, "3s", odds, o("50,100", "33,000", "17,000")), t += 40);
+                      long lastThree = t;
+                      w.feed(board(true, "2s", odds, o("50,100", "33,000", "17,000")), t += 40);
+                      check(r.lastTickAt > 0 && Math.abs(r.lastTickAt - (t0 + 1000)) <= 20,
+                            "the tick is placed within half a read gap of when it happened (" + (r.lastTickAt - t0 - 1000) + "ms off)");
+                      check(r.lastTickAt > lastThree && r.lastTickAt < t, "the tick sits between the last old digit and the first new one");
+                      // the last second: prices move hard, the board is read right up to the close
+                      String[] late = o("1.6/2.7", "2.8/2.5", "9.0/2.5");
+                      for (int i = 0; i < 20; i++) w.feed(board(true, "1s", odds, o("50,100", "33,000", "17,000")), t += 40);
+                      w.feed(board(true, "0s", late, o("62,000", "35,000", "11,000")), t += 40);
+                      long lastOpen = t;
+                      check(r.closesN == 0, "nothing closes while the board is open");
+                      // the betting panel folds - the board says so itself
+                      w.feed(board(false, "0s", null, null), t += 40);
+                      check(r.closesN == 1, "a folded betting panel closes the market at once");
+                      check(r.closeOdds.equals(java.util.Arrays.asList(late)), "the close carries the last prices actually on screen, not the 1s ones");
+                      check(r.closeBets.get(0).equals("62,000"), "and the pool those prices were made of");
+                      check(r.closeOpenAt == lastOpen && r.closeAt == t, "and when it was last seen open and first seen shut");
+                      check(!r.closeFromFrame, "with no prices on the folded frame, it says it used the last open one");
+                      check(r.closeSecs == 0, "and the seconds left on that last open frame");
+                      w.feed(board(false, "0s", null, null), t += 40);
+                      w.feed(party(), t += 40);
+                      w.feed(party(), t += 40);
+                      check(r.closesN == 1, "the close is sent once per race");
+                      w.feed(result("ORV"), t += 40);
+                      int ci = r.log.indexOf("close " + java.util.Arrays.asList(late));
+                      check(ci >= 0 && ci < r.log.indexOf("won ORV"), "the close reaches the app before the winner, so the race is logged with it");
+                  }
+
+                  // ── 2. one empty frame in the middle of betting is a glitch, not a close ──
+                  {
+                      Rec r = new Rec(); RaceWatcher w = new RaceWatcher(r);
+                      long t = 5_000_000L;
+                      String[] odds = o("2.0/2.7", "3.0/2.5", "6.0/2.5");
+                      w.feed(board(true, "9s", odds, o("5", "3", "2")), t);
+                      w.feed(party(), t += 40);
+                      check(r.closesN == 0, "a single frame with no board does not close the market");
+                      w.feed(board(true, "9s", odds, o("6", "3", "2")), t += 40);
+                      w.feed(party(), t += 40);
+                      check(r.closesN == 0, "and an open frame in between starts the count again");
+                      long first = t;
+                      w.feed(party(), t += 40);
+                      check(r.closesN == 1 && r.closeAt == first, "two in a row do, dated to the first of them");
+                      check(r.closeOdds.equals(java.util.Arrays.asList(odds)), "carrying the last open prices");
+                      // and if betting turns out to still be open, the close was early
+                      w.feed(board(true, "8s", o("1.9/2.7", "3.1/2.5", "6.2/2.5"), o("7", "3", "2")), t += 40);
+                      check(w.bettingOpen(), "a board that comes back open reopens the market");
+                      w.feed(board(false, "0s", o("1.8/2.7", "3.3/2.5", "6.5/2.5"), o("9", "4", "2")), t += 40);
+                      check(r.closesN == 2 && r.closeFromFrame && r.closeOdds.get(0).equals("1.8/2.7"),
+                            "a folded panel that still shows prices closes on those prices");
+                  }
+
+                  // ── 3. a winner seen with no close before it still closes first ──
+                  {
+                      Rec r = new Rec(); RaceWatcher w = new RaceWatcher(r);
+                      long t = 9_000_000L;
+                      w.feed(board(true, "5s", o("2.0/2.7", "3.0/2.5", "6.0/2.5"), o("5", "3", "2")), t);
+                      w.feed(result("SUV"), t += 40);
+                      check(r.closesN == 1 && r.log.indexOf("won SUV") > r.log.indexOf("close [2.0/2.7, 3.0/2.5, 6.0/2.5]"),
+                            "a result with no close before it closes first, then logs");
+                      // the same three cars again: a new race, not a continuation
+                      w.feed(board(true, "38s", o("2.0/2.7", "3.0/2.5", "6.0/2.5"), o("0", "0", "0")), t += 40);
+                      check(r.log.get(r.log.size() - 2).startsWith("fill") && w.bettingOpen(), "an identical line-up after a result fills again");
+                  }
+
+                  // ── 4. the clock a reader can trust: no tick from a jump ──
+                  {
+                      Rec r = new Rec(); RaceWatcher w = new RaceWatcher(r);
+                      long t = 12_000_000L;
+                      w.feed(board(true, "20s", o("2/2", "3/2", "6/2"), o("1", "1", "1")), t);
+                      w.feed(board(true, "17s", o("2/2", "3/2", "6/2"), o("1", "1", "1")), t += 3000);
+                      check(r.lastTickAt == 0, "a clock that jumped three seconds gives no tick rather than a wrong one");
+                      check(w.secondsLeft() == 17, "the seconds left are known to the reader, to set its pace");
+                  }
+                  // ── 5. the pace: nothing asked for is dropped, an open board is polled ──
+                  {
+                      ReadPacer p = new ReadPacer();
+                      long t = 100_000L;
+                      // a party with no board: no heartbeat, and the gap backs off
+                      p.started(t); p.done(t + 30, 30, true, false, false, -1);
+                      check(p.delay(t + 30, false) == -1, "with no board on screen nothing is read unless something asks");
+                      long d = p.delay(t + 100, true);
+                      check(d > 0 && t + 100 + d == t + p.gap(t + 100),
+                            "an event inside the gap is booked for the end of it, not thrown away");
+                      for (int i = 0; i < 20; i++) { t += 3000; p.started(t); p.done(t + 30, 30, true, false, false, -1); }
+                      check(p.gap(t) == ReadPacer.IDLE_MAX, "a long quiet spell backs off to " + ReadPacer.IDLE_MAX + "ms and no further");
+                      // a board appears: straight to the open pace, with a heartbeat
+                      t += 1000; p.started(t); p.done(t + 10, 10, true, true, true, 30);
+                      long hb = p.delay(t + 10, false);
+                      check(hb >= 0 && hb <= ReadPacer.OPEN_GAP,
+                            "an open board is polled on its own, events or not");
+                      check(p.gap(t + 10) == ReadPacer.OPEN_GAP, "every " + ReadPacer.OPEN_GAP + "ms while betting is open");
+                      t += 80; p.started(t); p.done(t + 8, 8, false, true, true, 4);
+                      check(p.gap(t + 8) == ReadPacer.FINAL_GAP, "and every " + ReadPacer.FINAL_GAP + "ms in the last " + ReadPacer.FINAL_SECS + " seconds");
+                      check(!p.fullDue(t + 20, true), "a fast read of the board's own views is enough between full looks");
+                      check(p.fullDue(t + 20, false), "but not when the board's views are not in hand");
+                      check(p.fullDue(t + ReadPacer.FULL_EVERY + 20, true), "and everything is looked at again every " + ReadPacer.FULL_EVERY + "ms");
+                      // a slow phone: never faster than it can manage
+                      ReadPacer slow = new ReadPacer();
+                      slow.started(t); slow.done(t + 120, 120, true, true, true, 20);
+                      check(slow.gap(t + 120) >= 120, "on a slow phone the open pace is never shorter than one pass");
+                      slow.started(t + 200); slow.done(t + 320, 120, false, true, true, 3);
+                      check(slow.gap(t + 320) >= 60 && slow.gap(t + 320) < 120, "and in the final seconds never shorter than half of one");
+                      // betting closed, race running: slower, but still looking for the result
+                      t += 1000; p.started(t); p.done(t + 30, 30, true, true, false, -1);
+                      long beat = p.delay(t + 30, false);
+                      check(beat > 0 && beat <= ReadPacer.AFTER_BEAT, "once betting closes it still looks for the result on its own");
+                      check(!p.describe(t).isEmpty(), "and can say what it is doing");
+                  }
+                  System.out.println("Verified " + passed + " board-reader checks on a desktop.");
+              }
+          }
+          ___RXA_EOF___
           cat > app/src/main/assets/manifest.json <<'___RXA_EOF___'
           {
             "name": "Race x AI Bot",
@@ -5117,6 +5883,19 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+
+      - name: Check the board reader on a desktop
+        # RaceReader, RaceWatcher and ReadPacer have no Android in them on
+        # purpose: whole races are played through them here, frame by frame,
+        # and a reader that has stopped seeing the close never reaches a phone.
+        run: |
+          mkdir -p desktop-check/classes
+          javac -d desktop-check/classes \
+            app/src/main/java/com/racexai/bot/RaceReader.java \
+            app/src/main/java/com/racexai/bot/RaceWatcher.java \
+            app/src/main/java/com/racexai/bot/ReadPacer.java \
+            desktop-check/RaceWatcherCheck.java
+          java -cp desktop-check/classes com.racexai.bot.RaceWatcherCheck
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3

@@ -10439,7 +10439,9 @@ function liveMarket(){
    again underneath it - which is the whole point, because the model that
    wins on hit rate and the model that wins on money are not the same model.
    ══════════════════════════════════════════════════════════════════════════ */
-const VALUE_LOW_DEF=1.8, VALUE_HIGH_DEF=2.7;
+// 1.7 is the floor asked for: whichever of the two comes in, it pays 1.7x or
+// better. It was 1.8. A slider that has been moved keeps its own value.
+const VALUE_LOW_DEF=1.7, VALUE_HIGH_DEF=2.7;
 function valueLow(){ const v=Number(state.valueLow);  return (isFinite(v)&&v>=1&&v<=8)?v:VALUE_LOW_DEF; }
 function valueHigh(){ const v=Number(state.valueHigh); return (isFinite(v)&&v>=1&&v<=20)?v:VALUE_HIGH_DEF; }
 function setValueLow(v){ state.valueLow=Math.max(1,Math.min(8,Number(v)||VALUE_LOW_DEF)); save(); try{valueRepaint();}catch(e){} }
@@ -10519,6 +10521,58 @@ function raceOddsFor(r,vi){
 }
 
 /**
+ * What one vehicle on a stored race SETTLED at - the live price it closed on.
+ *
+ * raceOddsFor is the last reading taken while betting was open, and on every
+ * race logged before the reader learned to watch the close that reading is a
+ * second or two early. Chamet reprices right up to the close - a quarter of
+ * the money lands in the last three seconds - so a pick that read 1.7 at
+ * "1s" could close at 1.6, and a race the floor should have skipped was
+ * counted. A race that carries its closing market is judged on that; an
+ * older one falls back to the last reading, which is all it ever had.
+ *
+ * Only for scoring a race after the fact. Nothing that PREDICTS may read
+ * this: the closing price is not known until the bet can no longer be made.
+ */
+function settleOddsFor(r,vi){
+  try{
+    if(r&&r.closeOdds&&r.closeOdds.length===3&&r.vehicles){
+      const i=r.vehicles.indexOf(vi);
+      if(i>=0){
+        const n=parseFloat(String(r.closeOdds[i]).split('/')[0]);
+        if(isFinite(n)&&n>0&&n<50)return n;
+      }
+    }
+  }catch(e){}
+  return raceOddsFor(r,vi);
+}
+
+/**
+ * Put the market a board closed on onto the race just logged from it.
+ *
+ * Only if it is the same three vehicles - a close left over from another
+ * board must never be filed against this one - and in this race's own lane
+ * order, which is how liveOdds is stored. True when something was attached.
+ */
+function attachCloseMarket(race,cm){
+  if(!race||!cm||!cm.odds||cm.odds.length!==3||!race.vehicles||race.vehicles.length!==3)return false;
+  const idx=(cm.cars||[]).map(function(c){
+    if(typeof c==='number')return c;
+    const n=String(c||'').trim().toLowerCase();
+    for(let i=0;i<ALL_VEHICLES.length;i++)if(ALL_VEHICLES[i].name.toLowerCase()===n)return i;
+    return -1; });
+  const lane=race.vehicles.map(function(v){ return idx.indexOf(v); });
+  if(!lane.every(function(i){ return i>=0; }))return false;
+  race.closeOdds=lane.map(function(i){ return cm.odds[i]; });
+  if(cm.bets&&cm.bets.length===3)race.closeBets=lane.map(function(i){ return cm.bets[i]; });
+  if(typeof cm.secs==='number')race.closeSecs=cm.secs;
+  race.closeAt=cm.closedAt;
+  if(cm.lastOpenAt)race.closeLagMs=Math.max(0,cm.closedAt-cm.lastOpenAt);
+  race.closeSrc=cm.src;
+  return true;
+}
+
+/**
  * The verdict on the board in front of you, for one pair of picks.
  *
  * Null means there is nothing to judge yet - no prices on the board - which
@@ -10579,7 +10633,7 @@ function valueSection(mode){
       if(top)r.w1++;
       r.last.push(won?1:0); if(r.last.length>10)r.last.shift();
     };
-    const seen={total:0,counted:0,noOdds:0,tooShort:0,beforeReset:0,otherMode:0,noCalls:0};
+    const seen={total:0,counted:0,noOdds:0,tooShort:0,beforeReset:0,otherMode:0,noCalls:0,closing:0};
     const vote=guardVoteKeys();
 
     guardSortedRaces().forEach(function(race){
@@ -10614,7 +10668,7 @@ function valueSection(mode){
         const c=race.engineCalls[k];
         if(!c||typeof c!=='object'||c.vi==null||c.vi2==null)continue;
         const play=verdict(k,c);
-        const a=raceOddsFor(race,c.vi), b=raceOddsFor(race,c.vi2);
+        const a=settleOddsFor(race,c.vi), b=settleOddsFor(race,c.vi2);
         if(!(a>0&&b>0))continue;
         anyPriced=true;
         if(!valuePasses(a,b)){ anyShort=true; continue; }
@@ -10626,7 +10680,7 @@ function valueSection(mode){
       // ── and one per bet strategy, on the Consensus pair ──
       const c=race.engineCalls.CONSENSUS;
       if(c&&c.vi!=null&&c.vi2!=null){
-        const a=raceOddsFor(race,c.vi), b=raceOddsFor(race,c.vi2);
+        const a=settleOddsFor(race,c.vi), b=settleOddsFor(race,c.vi2);
         if(a>0&&b>0&&valuePasses(a,b)&&
            !(mode==='guard'&&valueConsGuard(race,c)!==true)){
           const bp=boardPriceOf(race), P=race.engineCalls.PATCH;
@@ -10645,7 +10699,8 @@ function valueSection(mode){
           });
         }
       }
-      if(anyPriced)seen.counted++; else seen.noOdds++;
+      if(anyPriced){ seen.counted++; if(race.closeOdds&&race.closeOdds.length===3)seen.closing++; }
+      else seen.noOdds++;
       if(!anyPriced&&anyShort)seen.tooShort++;
     });
 
@@ -10874,6 +10929,12 @@ function valueHTML(){
       (bits.length?' The rest are out because '+bits.join('; ')+'.':'')+
       (few?'<br><br><b style="color:var(--gold)">Far too few to read anything into.</b> Give it '+
            VALUE_MIN_ROWS+'+ races with prices before acting on this page.':'')+
+      '<br>'+(sn.closing
+        ? '<b style="color:var(--green)">'+sn.closing+'</b> of them are judged on the price they '+
+          '<b style="color:var(--text2)">closed</b> at; '+(sn.counted-sn.closing?
+          (sn.counted-sn.closing)+' older ones only have the last reading before the close.':'every one.')
+        : 'None of these carry a closing price yet &mdash; each is judged on the last reading before '+
+          'the close, which can be a second early. Races the new reader watches are judged on the close.')+
       '</div>';
   }
   if(!rows.length){
@@ -18342,8 +18403,11 @@ function pricePanelHTML(){
     const n1=(ALL_VEHICLES[pk.vi1]||{}).name||'', n2=(ALL_VEHICLES[pk.vi2]||{}).name||'';
     const secs=liveSecs();
     // the clock, and how much it is worth trusting what sits beside it
-    const clock=(secs==null)?''
-      :('<span style="font-size:11px;font-weight:900;color:'+
+    // data-rxl marks what the live painter (RXALive) rewrites on every reading,
+    // in place, between the full redraws - the clock to the hundredth, the two
+    // prices, the pool, and the verdict itself
+    const clock=(secs==null)?'<span data-rxl="clock"></span>'
+      :('<span data-rxl="clock" style="font-size:11px;font-weight:900;font-variant-numeric:tabular-nums;color:'+
          (secs<=15?'var(--green)':secs<=25?'var(--gold)':'var(--text3)')+
          '">'+secs+'s</span>');
     const head='<div style="display:flex;align-items:baseline;gap:6px;margin-bottom:6px">'+
@@ -18363,16 +18427,19 @@ function pricePanelHTML(){
     const tone=g.pass?'var(--green)':'var(--accent2)';
     // WHEN THE PRICES ARE STILL YOUNG, SAY SO RATHER THAN LOOK CERTAIN.
     const early=(secs!=null&&secs>25);
-    return '<div class="price-block" style="margin-bottom:10px">'+head+
-      '<div style="display:flex;align-items:center;gap:10px;background:#101010;border:1.5px solid '+
+    return '<div class="price-block" data-rxl-vi1="'+pk.vi1+'" data-rxl-vi2="'+pk.vi2+'" style="margin-bottom:10px">'+head+
+      '<div data-rxl="box" style="display:flex;align-items:center;gap:10px;background:#101010;border:1.5px solid '+
         tone+';border-radius:9px;padding:10px 12px'+(early?';opacity:.6':'')+'">'+
-        '<div style="font-size:15px;font-weight:900;color:'+tone+';line-height:1.1;white-space:nowrap">'+
+        '<div data-rxl="verdict" style="font-size:15px;font-weight:900;color:'+tone+';line-height:1.1;white-space:nowrap">'+
           (g.pass?'✅ PLAY':'⛔ SKIP')+'</div>'+
         '<div style="flex:1;line-height:1.4">'+
-          '<div style="font-size:11px;font-weight:800;color:'+tone+'">'+
-            n1+' <b style="color:var(--text2)">'+g.a.toFixed(1)+'</b> &middot; '+
-            n2+' <b style="color:var(--text2)">'+g.b.toFixed(1)+'</b></div>'+
-          '<div style="font-size:9px;color:var(--text3)">'+
+          '<div data-rxl="pair" style="font-size:11px;font-weight:800;color:'+tone+'">'+
+            n1+' <b data-rxl="p1" style="color:var(--text2)">'+g.a.toFixed(1)+'</b>'+
+            '<span data-rxl="x1" style="font-size:8.5px;font-weight:600;color:var(--text3)"></span> &middot; '+
+            n2+' <b data-rxl="p2" style="color:var(--text2)">'+g.b.toFixed(1)+'</b>'+
+            '<span data-rxl="x2" style="font-size:8.5px;font-weight:600;color:var(--text3)"></span></div>'+
+          '<div data-rxl="pool" style="font-size:9px;color:var(--text3);font-variant-numeric:tabular-nums"></div>'+
+          '<div data-rxl="note" style="font-size:9px;color:var(--text3)">'+
             (early?'Early &mdash; these will move. '
                   :(g.pass?'Both pay enough. ':'Too short &mdash; the lower is under '+valueLow().toFixed(1)+'. '))+
             'A split returns <b style="color:'+tone+'">'+g.ret.toFixed(2)+'&times;</b> if either wins.'+
@@ -18609,6 +18676,15 @@ function guardStatsHTML(){
           const tr=raceTrailFor(lm&&lm.cars);
           if(tr){last.marketTrail=tr;touched=true;}
         }catch(e){}
+        // ── AND THE MARKET IT CLOSED ON ──
+        //
+        // The reader now watches the board right up to the close and says when
+        // it shut. Those prices are what the race is SETTLED on - the Value page
+        // counts a race only if the two picks still cleared the floor here -
+        // and they sit beside liveOdds rather than replacing them, so nothing
+        // that learns from liveOdds sees anything it did not see before.
+        try{ if(attachCloseMarket(last,window.__closeMarket))touched=true; }catch(e){}
+        window.__closeMarket=null;
         // The two surfaces the race itself revealed, read off Chamet while it
         // ran. Logged by hand until now; with the bot running they arrive on
         // their own, and every race that carries them makes the Human model
@@ -21873,7 +21949,8 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
        Returns the change in units, or null if the board was never read. */
     function unitsOn(r, picks){
       if (!picks || picks[0] === picks[1]) return null;
-      var o1 = raceOddsFor(r, picks[0]), o2 = raceOddsFor(r, picks[1]);
+      var settle = (typeof settleOddsFor === 'function') ? settleOddsFor : raceOddsFor;
+      var o1 = settle(r, picks[0]), o2 = settle(r, picks[1]);   /* what it was paid at */
       if (!(o1 > 0) || !(o2 > 0)) return null;
       var ret = 1 / (1/o1 + 1/o2);                 /* paid the same either way */
       return (r.winner === picks[0] || r.winner === picks[1]) ? (ret - 1) : -1;
@@ -23650,6 +23727,289 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
   } catch(e){ window.__rxLogout.threw = String(e && e.message || e); }
 })();
 </script>
+<script>
+/* RXA_LIVE_START
+   ══════════════════════════════════════════════════════════════════════════
+   THE MARKET, LIVE, TO THE LAST INSTANT
+
+   The board reader now looks at Chamet's board many times a second, right up
+   to the close, and says when the close happened. This is the page's half:
+
+     PAINT EVERY READING. The price block was rebuilt at most once every 1.2s,
+            and not at all while the voice was talking - so at "0s" it could
+            still be showing the price from a second and a half earlier. The
+            numbers in it are now rewritten in place on every reading and the
+            clock runs to the hundredth of a second between them, while the
+            heavy rebuild keeps its own pace.
+     KNOW THE CLOSE. When betting shuts, the block says so and shows the
+            prices it shut at - the ones the race is settled on.
+     DO NOT DROWN. A reading can now arrive every 25ms. The models and the
+            guard behind rxaOddsChanged are not rerun that often: at most every
+            RUN_GAP, at once whenever the seconds digit changes or the board
+            closes, and always once more after the last reading, so the final
+            state is never left unprocessed.
+
+   Nothing here predicts anything. It shows the board and times it.
+   ══════════════════════════════════════════════════════════════════════════ */
+(function(){
+  'use strict';
+  // The models and the guard cost ~25ms a run on a desktop with 1,175 races,
+  // several times that on a phone; a reading every 25ms would be all of the
+  // phone's time. The price block itself is painted on every reading anyway.
+  const RUN_GAP=500;          // the heavy chain, at most this often
+  const STALE_MS=2500;        // a reading this old is said to be old
+  const OFFSETS_KEY='rxaCloseOffsets';
+
+  function num(s){ const n=parseFloat(String(s==null?'':s).replace(/,/g,'')); return isFinite(n)?n:null; }
+  /** The live (first) price on a card like "1.7/2.5", or null. */
+  function livePrice(raw){
+    const head=String(raw==null?'':raw).split('/')[0].trim();
+    const n=parseFloat(head);
+    return (head&&head!=='-'&&isFinite(n)&&n>0&&n<50)?n:null;
+  }
+  /**
+   * The pool, each vehicle's share of it, and the price before rounding.
+   *
+   * Chamet's live price is the pool divided by the stake on that vehicle,
+   * rounded DOWN to one decimal - that formula matches 95.5% of the 6,477
+   * readings in the history exactly. So 1.7 on the card can be anything from
+   * 1.70 to 1.79, and a 1.70 is one small bet from becoming 1.6. The exact
+   * figure says which.
+   */
+  function exact(bets){
+    const b=(bets||[]).map(num);
+    if(b.length!==3||b.some(function(x){ return !(x>0); }))return null;
+    const pot=b[0]+b[1]+b[2];
+    return {pot:pot, stake:b, exact:b.map(function(x){ return pot/x; }),
+            share:b.map(function(x){ return x/pot; })};
+  }
+
+  /**
+   * Milliseconds until betting closes, from a reading.
+   *
+   * The board prints whole seconds and shows "1s" for the whole last second -
+   * the close comes as it would turn to 0. The reader times the moment each
+   * digit changes (tickAt), so the time left is the digit's worth less what
+   * has passed since, plus whatever the closes this phone has watched say the
+   * real close runs early or late by. While the reading is fresh the clock is
+   * never allowed to disagree with the digit on the board; once it ages, it
+   * runs on alone, down to zero.
+   */
+  function clockMs(m,now,offset){
+    if(!m||typeof m.secs!=='number'||!isFinite(m.secs)||m.secs<0)return null;
+    if(m.closed)return {ms:0,board:0,sure:true,closed:true};
+    const s=m.secs, read=m.readAt||m.at||now, age=now-read;
+    let board=(m.tickAt>0)?(s*1000-(now-m.tickAt)):(s*1000-500-age);
+    if(age<1200){
+      if(board>s*1000)board=s*1000;
+      if(board<(s-1)*1000)board=Math.max(0,(s-1)*1000);
+    }
+    if(board<0)board=0;
+    const ms=Math.max(0,board+(offset||0));
+    return {ms:ms,board:board,sure:m.tickAt>0,closed:false};
+  }
+
+  /**
+   * One more observed close, and what it says about the clock: where the
+   * close actually fell (between the last open read and the first shut one),
+   * minus where the digit said it would.
+   */
+  function closeOffset(lm,c){
+    if(!lm||!c||!(lm.tickAt>0)||typeof lm.secs!=='number'||!(c.closedAt>0))return null;
+    const eta=lm.tickAt+lm.secs*1000;
+    const at=c.lastOpenAt?(c.lastOpenAt+c.closedAt)/2:c.closedAt;
+    const off=at-eta;
+    return (Math.abs(off)<=3000)?Math.round(off):null;   // past 3s it is not the same close
+  }
+  /** The typical offset, from the closes this phone has seen. 0 until there are three. */
+  function offsetOf(list){
+    const a=(list||[]).filter(function(x){ return typeof x==='number'&&isFinite(x); }).slice().sort(function(x,y){ return x-y; });
+    if(a.length<3)return 0;
+    const mid=a.length>>1, med=a.length%2?a[mid]:(a[mid-1]+a[mid])/2;
+    return Math.max(-1500,Math.min(1500,Math.round(med)));
+  }
+
+  /** "12,345,678" for the pool, as Chamet writes it. */
+  function money(x){ return Math.round(x).toString().replace(/\B(?=(\d{3})+(?!\d))/g,','); }
+  function clockText(c){
+    if(!c)return '';
+    if(c.closed)return 'CLOSED';
+    const s=c.ms/1000;
+    return (s>=10?s.toFixed(1):s.toFixed(2))+'s';
+  }
+
+  /** Index of a vehicle in the reading's lane order, by name or by number. */
+  function laneOf(m,vi){
+    if(!m||!m.cars)return -1;
+    for(let i=0;i<m.cars.length;i++){
+      const c=m.cars[i];
+      if(typeof c==='number'){ if(c===vi)return i; continue; }
+      const n=String(c||'').trim().toLowerCase();
+      try{ if(ALL_VEHICLES[vi]&&ALL_VEHICLES[vi].name.toLowerCase()===n)return i; }catch(e){}
+    }
+    return -1;
+  }
+
+  /**
+   * What the block should say about one pair on one reading. Pure: the
+   * painter below only copies this onto the screen.
+   */
+  function view(m,vi1,vi2,now,offset,lo,hi){
+    if(!m||!m.odds||m.odds.length!==3)return null;
+    const i1=laneOf(m,vi1), i2=laneOf(m,vi2);
+    if(i1<0||i2<0)return null;
+    const a=livePrice(m.odds[i1]), b=livePrice(m.odds[i2]);
+    if(!(a>0&&b>0))return null;
+    const ex=exact(m.bets);
+    const pass=Math.min(a,b)>=lo&&Math.max(a,b)>=hi;
+    const age=now-(m.readAt||m.at||now);
+    // the shorter pick is showing the floor itself - 1.70 to 1.79 all print
+    // as 1.7 - so one late bet on it can tip it under
+    const edge=ex?Math.min(ex.exact[i1],ex.exact[i2]):null;
+    const knife=pass&&!m.closed&&edge!=null&&edge<lo+0.1;
+    return {a:a,b:b,pass:pass,ret:(a*b)/(a+b),
+            x1:ex?ex.exact[i1]:null, x2:ex?ex.exact[i2]:null,
+            pot:ex?ex.pot:null, s1:ex?ex.share[i1]:null, s2:ex?ex.share[i2]:null,
+            clock:clockMs(m,now,offset), closed:!!m.closed, stale:!m.closed&&age>STALE_MS,
+            age:age, knife:knife};
+  }
+
+  // ── the closes this phone has seen, kept outside the save file ──
+  let offsets=[];
+  try{ offsets=JSON.parse(localStorage.getItem(OFFSETS_KEY)||'[]')||[]; }catch(e){ offsets=[]; }
+  function offsetNow(){ return offsetOf(offsets); }
+
+  // ── the price block, rewritten in place ──
+  let raf=0, potShown=null, lastVerdict=null, dropUntil=0;
+  function set(el,txt){ if(el&&el.textContent!==txt)el.textContent=txt; }
+  function paint(){
+    raf=0;
+    let again=false;
+    try{
+      const panel=document.getElementById('pricePanel');
+      const blk=panel&&panel.querySelector('.price-block');
+      const m=window.__liveMarket;
+      if(!panel||!m)return;
+      if(typeof valueGateOn==='function'&&!valueGateOn())return;   // the block is switched off
+      // the block is still saying "waiting for the odds" and now there are
+      // some: one rebuild, then it is painted in place from here on
+      if(!blk||!blk.querySelector('[data-rxl="box"]')){
+        if(m.odds&&m.odds.length===3&&typeof priceInject==='function'){
+          const k=(m.cars||[]).join('|')+'|'+(m.odds||[]).join('|');
+          if(paint._built!==k){ paint._built=k; try{ priceInject(); }catch(e){} }
+        }
+        return;
+      }
+      const vi1=parseInt(blk.getAttribute('data-rxl-vi1'),10), vi2=parseInt(blk.getAttribute('data-rxl-vi2'),10);
+      const lo=(typeof valueLow==='function')?valueLow():1.7, hi=(typeof valueHigh==='function')?valueHigh():2.7;
+      const now=Date.now();
+      const v=view(m,vi1,vi2,now,offsetNow(),lo,hi);
+      if(!v)return;
+      const q=function(k){ return blk.querySelector('[data-rxl="'+k+'"]'); };
+      const tone=v.closed?(v.pass?'var(--green)':'var(--accent2)')
+                :v.stale?'var(--text3)':(v.pass?(v.knife?'var(--gold)':'var(--green)'):'var(--accent2)');
+      // a PLAY that turns into a SKIP in the last seconds is the one change
+      // worth shouting about: it is the bet that should not now be placed
+      const verdict=v.pass?'play':'skip';
+      if(lastVerdict&&lastVerdict.key===(m.cars||[]).join('|')&&lastVerdict.v==='play'&&verdict==='skip'
+         &&v.clock&&v.clock.ms<=5000)dropUntil=now+2500;
+      lastVerdict={key:(m.cars||[]).join('|'),v:verdict};
+      const dropping=!v.pass&&now<dropUntil;
+      set(q('verdict'),v.closed?(v.pass?'✅ CLOSED':'⛔ CLOSED'):(v.pass?'✅ PLAY':(dropping?'⚠️ SKIP':'⛔ SKIP')));
+      const box=q('box');
+      if(box){
+        if(box.style.borderColor!==tone)box.style.borderColor=tone;
+        const op=(v.stale||(!v.closed&&v.clock&&v.clock.ms>25000))?'.6':'1';
+        if(box.style.opacity!==op)box.style.opacity=op;
+        const bg=dropping?'rgba(255,95,109,.14)':'#101010';
+        if(box.style.background!==bg)box.style.background=bg;
+      }
+      const ve=q('verdict'); if(ve&&ve.style.color!==tone)ve.style.color=tone;
+      const pr=q('pair'); if(pr&&pr.style.color!==tone)pr.style.color=tone;
+      set(q('p1'),v.a.toFixed(1)); set(q('p2'),v.b.toFixed(1));
+      set(q('x1'),v.x1!=null?' ('+v.x1.toFixed(2)+')':''); set(q('x2'),v.x2!=null?' ('+v.x2.toFixed(2)+')':'');
+      // the pool counts up to each new reading rather than jumping to it
+      if(v.pot!=null){
+        if(potShown==null||v.pot<potShown||v.closed)potShown=v.pot;
+        else { const d=v.pot-potShown; potShown=(d<2)?v.pot:potShown+d*0.35; if(potShown!==v.pot)again=true; }
+        set(q('pool'),'Pool '+money(potShown)+
+          (v.s1!=null?'  ·  '+Math.round(v.s1*100)+'% / '+Math.round(v.s2*100)+'% on these two':''));
+      }
+      const ck=q('clock');
+      if(ck){
+        set(ck,v.clock?clockText(v.clock):'');
+        const s=v.clock?v.clock.ms/1000:null;
+        const col=v.closed?'var(--accent2)':s==null?'var(--text3)':s<=15?'var(--green)':s<=25?'var(--gold)':'var(--text3)';
+        if(ck.style.color!==col)ck.style.color=col;
+      }
+      set(q('note'),
+        v.closed ? ('Betting closed at '+v.a.toFixed(1)+' and '+v.b.toFixed(1)+
+                    ' — the race is counted on these. '+(v.pass?'Both cleared the floor.':'Under '+lo.toFixed(1)+', so it is not counted.'))
+        : v.stale ? ('No reading for '+(v.age/1000).toFixed(1)+'s — is Chamet still on screen?')
+        : dropping ? ('The price just dropped under '+lo.toFixed(1)+' — this is no longer a bet.')
+        : v.knife ? ('Right on the floor ('+Math.min(v.x1,v.x2).toFixed(2)+') — one late bet can push it under '+lo.toFixed(1)+'.')
+        : ((v.pass?'Both pay enough. ':'Too short — the lower is under '+lo.toFixed(1)+'. ')+
+           'A split returns '+v.ret.toFixed(2)+'× if either wins. Read '+Math.max(0,Math.round(v.age))+'ms ago.'));
+      // keep the clock running while betting is open and the reading is live
+      if(!v.closed&&v.clock&&v.clock.ms>0&&v.age<60000)again=true;
+    }catch(e){}
+    if(again)kick();
+  }
+  function kick(){
+    if(raf)return;
+    try{ raf=(typeof requestAnimationFrame==='function')?requestAnimationFrame(paint):setTimeout(paint,16); }
+    catch(e){ raf=0; }
+  }
+
+  // ── the heavy chain, at its own pace ──
+  const inner=window.rxaOddsChanged;
+  let ranAt=0, ranSecs=null, ranClosed=false, trail=0;
+  function run(){
+    trail=0;
+    const m=window.__liveMarket;
+    ranAt=Date.now(); ranSecs=m?m.secs:null; ranClosed=!!(m&&m.closed);
+    try{ if(typeof inner==='function')inner.apply(window,arguments); }catch(e){}
+  }
+  if(typeof inner==='function'){
+    window.rxaOddsChanged=function(){
+      kick();
+      const m=window.__liveMarket;
+      const now=Date.now();
+      // the moments that decide something are never held back: a new second
+      // (the timed lock, the second call) and the close
+      const urgent=!m||m.secs!==ranSecs||(!!m.closed)!==ranClosed;
+      if(urgent||now-ranAt>=RUN_GAP){ if(trail){ clearTimeout(trail); trail=0; } run(); return; }
+      if(!trail)trail=setTimeout(run,Math.max(0,RUN_GAP-(now-ranAt)));
+    };
+  }
+
+  // A full rebuild of the block writes its static first draft over whatever
+  // was painted - "1s", "SKIP" - and after the close nothing else would come
+  // along to correct it. So every rebuild is painted over at once.
+  if(typeof window.priceInject==='function'){
+    const rebuild=window.priceInject;
+    window.priceInject=function(){ const r=rebuild.apply(this,arguments); kick(); return r; };
+  }
+
+  // ── the close ──
+  window.rxaMarketClosed=function(c){
+    try{
+      const lm=window.__liveMarket;
+      const off=closeOffset(lm,c);
+      if(off!=null){
+        offsets.push(off); if(offsets.length>25)offsets=offsets.slice(-25);
+        try{ localStorage.setItem(OFFSETS_KEY,JSON.stringify(offsets)); }catch(e){}
+      }
+    }catch(e){}
+    kick();
+  };
+
+  window.RXALive={livePrice:livePrice, exact:exact, clockMs:clockMs, closeOffset:closeOffset,
+                  offsetOf:offsetOf, view:view, laneOf:laneOf, clockText:clockText, money:money,
+                  offsetNow:offsetNow, kick:kick, RUN_GAP:RUN_GAP};
+})();
+/* RXA_LIVE_END */
+</script>
 <script type="application/x-rxa-tests" id="rxa-road-lab-tests">
 (function(){
   const fs=require('fs'),vm=require('vm'),assert=require('assert');
@@ -23780,6 +24140,161 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
   console.log('Verified '+tests+' PDF parsing, isolation and live-recording checks.');
 })();
 
+</script>
+<script type="application/x-rxa-tests" id="rxa-live-market-tests">
+'use strict';
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const html=fs.readFileSync(global.RXA_HTML_PATH||process.argv[2]||require('path').join(__dirname,'index.html'),'utf8');
+const live=html.match(/\/\* RXA_LIVE_START[\s\S]*?\/\* RXA_LIVE_END \*\//)[0];
+/* one top-level function out of the page, by name - braces counted outside strings and comments */
+function fnSrc(name){
+  const at=html.search(new RegExp('\\nfunction '+name+'\\('));
+  if(at<0)throw new Error('no function '+name);
+  let i=html.indexOf('{',at),depth=0,q=null;
+  for(;i<html.length;i++){
+    const c=html[i],n=html[i+1];
+    if(q){ if(c==='\\'){i++;continue;} if(c===q)q=null; continue; }
+    if(c==='/'&&n==='/'){ i=html.indexOf('\n',i); continue; }
+    if(c==='/'&&n==='*'){ i=html.indexOf('*/',i)+1; continue; }
+    if(c==="'"||c==='"'||c==='`'){ q=c; continue; }
+    if(c==='{')depth++;
+    else if(c==='}'&&--depth===0)return html.slice(at+1,i+1);
+  }
+  throw new Error('unbalanced '+name);
+}
+function liveEnv(){
+  const env={console,JSON,Math,Object,Array,String,Number,parseFloat,parseInt,isFinite,_clock:1000000,_timers:[],_inner:0};
+  env.Date=class extends Date{constructor(x){super(x==null?env._clock:x);}static now(){return env._clock;}};
+  env.setTimeout=(fn,ms)=>{env._timers.push({at:env._clock+(ms||0),fn});return env._timers.length;};
+  env.clearTimeout=id=>{if(env._timers[id-1])env._timers[id-1].fn=null;};
+  env.run=()=>{for(const t of env._timers)if(t.fn&&t.at<=env._clock){const f=t.fn;t.fn=null;f();}};
+  vm.createContext(env);
+  vm.runInContext(`window=this;const _ls={};localStorage={getItem:k=>(k in _ls?_ls[k]:null),setItem:(k,v)=>{_ls[k]=String(v);}};
+    document={getElementById:()=>null};requestAnimationFrame=()=>1;
+    ALL_VEHICLES=['Monster Truck','Car','ORV','SUV','Supercar','Stock Car','Motorcycle','Sports Car','ATV'].map(name=>({name}));
+    window.rxaOddsChanged=function(){_inner++;};`,env);
+  vm.runInContext(live,env);
+  return env;
+}
+let tests=0;function test(name,fn){fn();tests++;console.log('PASS Live market: '+name);}
+
+test('The exact price is the pool over the stake, and Chamet shows it rounded down',()=>{
+  const x=liveEnv(),L=x.RXALive;
+  // a real reading from the history: 3.1 / 5.2 / 2.0 on these stakes
+  const e=L.exact(['7,039,876','4,230,942','10,969,309']);
+  assert.strictEqual(e.pot,22240127);
+  assert.deepStrictEqual(e.exact.map(v=>Math.floor(v*10+1e-9)/10),[3.1,5.2,2.0]);
+  assert(Math.abs(e.share.reduce((a,b)=>a+b,0)-1)<1e-12);
+  assert.strictEqual(L.exact(['1','0','2']),null,'a vehicle with nothing on it has no price');
+  assert.strictEqual(L.livePrice('1.7/2.5'),1.7);assert.strictEqual(L.livePrice('-/2.5'),null);
+  assert.strictEqual(L.livePrice('999/2.5'),null,'a reading mid-update is not a price');
+});
+
+test('The clock runs in milliseconds between readings and never disagrees with a fresh board',()=>{
+  const x=liveEnv(),L=x.RXALive,T=x._clock;
+  const m={secs:3,tickAt:T,readAt:T,odds:['2','3','5']};
+  assert.strictEqual(L.clockMs(m,T,0).ms,3000);
+  assert.strictEqual(L.clockMs(m,T+250,0).ms,2750);
+  assert.strictEqual(L.clockText(L.clockMs(m,T+250,0)),'2.75s');
+  assert.strictEqual(L.clockText({ms:12345,closed:false}),'12.3s');
+  // a fresh "3s" reading cannot be shown as 1.9s, however late the tick looked
+  const lateTick={secs:3,tickAt:T-1500,readAt:T};
+  assert(L.clockMs(lateTick,T,0).board>=2000&&L.clockMs(lateTick,T,0).board<=3000);
+  // once the reading ages the clock runs on alone, and stops at zero
+  assert.strictEqual(L.clockMs(m,T+5000,0).ms,0);
+  // a reading with no tick is placed in the middle of its second
+  assert.strictEqual(L.clockMs({secs:5,readAt:T},T,0).ms,4500);
+  // closed is closed
+  const c=L.clockMs({secs:1,tickAt:T,readAt:T,closed:true},T,0);
+  assert(c.closed&&c.ms===0&&L.clockText(c)==='CLOSED');
+  assert.strictEqual(L.clockMs({secs:-1},T,0),null);
+});
+
+test('Observed closes teach the clock how early or late Chamet really shuts',()=>{
+  const x=liveEnv(),L=x.RXALive,T=x._clock;
+  // the digit said 1s at T, so the close was due at T+1000; it came 120ms late
+  const lm={secs:1,tickAt:T};
+  assert.strictEqual(L.closeOffset(lm,{lastOpenAt:T+1100,closedAt:T+1140}),120);
+  assert.strictEqual(L.closeOffset(lm,{closedAt:T+9000}),null,'a close 8s off is not this close');
+  assert.strictEqual(L.closeOffset({secs:1},{closedAt:T}),null,'no tick, nothing to learn');
+  assert.strictEqual(L.offsetOf([120,130]),0,'fewer than three closes teach nothing');
+  assert.strictEqual(L.offsetOf([120,130,110,900]),125);
+  assert.strictEqual(L.offsetOf([3000,3000,3000]),1500,'and it is never allowed to move the clock far');
+  // the page keeps them, outside the save file
+  x._clock+=1;vm.runInContext(`__liveMarket={secs:1,tickAt:${T}};`,x);
+  for(const off of [100,120,140])vm.runInContext(`rxaMarketClosed({closedAt:${T+1000+off}})`,x);
+  assert.strictEqual(vm.runInContext('RXALive.offsetNow()',x),120);
+  assert.deepStrictEqual(JSON.parse(vm.runInContext("localStorage.getItem('rxaCloseOffsets')",x)),[100,120,140]);
+});
+
+test('The verdict follows the price to the last reading: 1.7 and 2.7 play, 1.6 and 2.8 do not',()=>{
+  const x=liveEnv(),L=x.RXALive,T=x._clock;
+  // SUV and ORV, by name as the reader sends them, in lane order
+  const m={cars:['SUV','ORV','Car'],odds:['1.7/2.7','2.7/2.5','5.5/2.5'],bets:['57','37','6'],secs:1,tickAt:T,readAt:T};
+  const v=L.view(m,3,2,T+100,0,1.7,2.7);
+  assert(v.pass&&v.a===1.7&&v.b===2.7);
+  assert(v.knife,'1.75 exact is within a whisker of the floor, and says so');
+  const late=Object.assign({},m,{odds:['1.6/2.7','2.8/2.5','5.9/2.5'],bets:['60','35','5'],readAt:T+900});
+  assert(!L.view(late,3,2,T+950,0,1.7,2.7).pass);
+  const closed=Object.assign({},late,{closed:true});
+  const c=L.view(closed,3,2,T+2000,0,1.7,2.7);
+  assert(c.closed&&!c.pass&&c.clock.closed&&!c.stale,'a closed board is shown closed, at the closing prices');
+  assert(L.view(m,3,2,T+4000,0,1.7,2.7).stale,'a reading 4s old says it is old');
+  assert.strictEqual(L.view(m,3,8,T,0,1.7,2.7),null,'a pick not on this board has no price here');
+});
+
+test('Readings arrive every 25ms; the models behind them are not rerun for each one, and never miss the last one',()=>{
+  const x=liveEnv();
+  vm.runInContext(`__liveMarket={secs:4,odds:['2','3','5'],bets:['1','1','1']};rxaOddsChanged();`,x);
+  assert.strictEqual(x._inner,1,'the first reading runs at once');
+  for(let i=0;i<20;i++){ x._clock+=25; vm.runInContext(`__liveMarket.bets=['${i+2}','1','1'];rxaOddsChanged();`,x); x.run(); }
+  const gap=x.RXALive.RUN_GAP;
+  assert(x._inner>=2&&x._inner<=1+Math.ceil(500/gap),'20 readings in half a second run the models '+x._inner+' times, not 20');
+  const before=x._inner;
+  x._clock+=25; vm.runInContext(`__liveMarket.bets=['99','1','1'];rxaOddsChanged();`,x);
+  x._clock+=gap+50; x.run();
+  assert.strictEqual(x._inner,before+1,'the last reading is always run, after the gap');
+  vm.runInContext(`__liveMarket.secs=3;rxaOddsChanged();`,x);
+  assert.strictEqual(x._inner,before+2,'a new second is never held back');
+  x._clock+=10; vm.runInContext(`__liveMarket.closed=true;rxaOddsChanged();`,x);
+  assert.strictEqual(x._inner,before+3,'nor is the close');
+});
+
+test('A race is settled on the price it closed at, and a late drop under the floor is not counted',()=>{
+  const env={console,JSON,Math,Object,Array,String,Number,parseFloat,parseInt,isFinite};
+  vm.createContext(env);
+  vm.runInContext(`ALL_VEHICLES=['Monster Truck','Car','ORV','SUV','Supercar','Stock Car','Motorcycle','Sports Car','ATV'].map(name=>({name}));
+    state={results:[],valueLow:1.7,valueHigh:2.7};
+    renderMemo=(k,f)=>f();orderedModelKeys=()=>['HUMAN'];ENGINES=[];CONSENSUS_ROWS=[];guardVoteKeys=()=>[];
+    guardSortedRaces=()=>state.results;aiScoredRace=()=>true;inCurrentMode=()=>true;usesAgreementGate=()=>false;
+    selfTallyNew=()=>({});selfEstimate=()=>null;selfTallyAdd=()=>{};SELF_EDGE=0;rowName=k=>k;boardPriceOf=()=>null;
+    SEL_LEVELS=[];valueConsGuard=()=>true;VALUE_MIN_ROWS=25;`,env);
+  for(const f of ['raceOddsFor','settleOddsFor','attachCloseMarket','valuePasses','pairReturn','valueLow','valueHigh','valueSection'])
+    vm.runInContext(fnSrc(f),env);
+  vm.runInContext(html.match(/const VALUE_LOW_DEF=[^;]*;/)[0].replace('const ','var '),env);
+  assert.strictEqual(env.VALUE_LOW_DEF,1.7,'the floor is 1.7 unless the slider was moved');
+  const race=(close)=>({t:1,vehicles:[3,2,1],winner:3,road:0,engineCalls:{HUMAN:{vi:3,vi2:2}},
+    liveOdds:['1.7/2.7','2.7/2.5','5.5/2.5'],closeOdds:close});
+  // the close arrives in the reader's lane order and is filed in the race's
+  const r1={t:1,vehicles:[3,2,1]};
+  assert(env.attachCloseMarket(r1,{cars:['SUV','ORV','Car'],odds:['1.6/2.7','2.8/2.5','5.9/2.5'],bets:['60','35','5'],
+                                   secs:0,lastOpenAt:500,closedAt:530,src:'last-open-frame'}));
+  assert.deepStrictEqual(r1.closeOdds,['1.6/2.7','2.8/2.5','5.9/2.5']);
+  assert.strictEqual(r1.closeLagMs,30);assert.strictEqual(r1.closeSrc,'last-open-frame');
+  assert(!env.attachCloseMarket({vehicles:[3,2,4]},{cars:['SUV','ORV','Car'],odds:['1','2','3']}),
+         'a close from another board is never filed against this race');
+  const dropped=race(r1.closeOdds), held=race(['1.7/2.7','2.8/2.5','5.4/2.5']), old=race(undefined);
+  assert.strictEqual(env.raceOddsFor(dropped,3),1.7,'the last open reading is untouched');
+  assert.strictEqual(env.settleOddsFor(dropped,3),1.6,'and the race settles on the close');
+  assert.strictEqual(env.settleOddsFor(old,3),1.7,'an older race falls back to the last reading it has');
+  env.state.results=[dropped,held,old];
+  const rows=env.valueSection('all'),h=rows.find(r=>r.key==='HUMAN');
+  assert.strictEqual(h.n,2,'the race that closed at 1.6 is not counted');
+  assert.strictEqual(rows.seen.closing,2,'and the page says how many priced races carry a close');
+  assert.strictEqual(rows.seen.counted,3);
+});
+
+console.log('Verified '+tests+' live-market checks.');
 </script>
 <!-- RXA_ROAD_LAB_ASSETS_END -->
 </body>

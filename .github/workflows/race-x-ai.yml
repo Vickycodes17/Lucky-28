@@ -47,7 +47,7 @@ jobs:
           if (!path) throw new Error('index.html is required');
           const html = fs.readFileSync(path, 'utf8');
           global.RXA_HTML_PATH = path;
-          for (const id of ['rxa-accuracy-tests','rxa-integration-tests','rxa-road-lab-tests','rxa-pdf-rule-tests']) {
+          for (const id of ['rxa-accuracy-tests','rxa-integration-tests','rxa-road-lab-tests','rxa-pdf-rule-tests','rxa-live-market-tests']) {
             const source = html.match(new RegExp('<script[^>]*id="'+id+'"[^>]*>([\\s\\S]*?)<\\/script>'));
             if (!source) throw new Error('Missing embedded checks: '+id);
             vm.runInThisContext('(function(){\n'+source[1]+'\n})();', { filename: id+'.cjs' });

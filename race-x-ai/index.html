@@ -9744,6 +9744,11 @@ function edgeLateCall(){
   try{
     if(!state.autoVoice||!appOnScreen())return;
     if(!alertCfg().menu)return;
+    // Stop means this race, whatever the money or the lock does next
+    if(window._silencedRace&&window._silencedRace===boardSigNow())return;
+    // an announcement is already on its way and will say the pair as it is
+    // then - saying it here too would be the same line twice, a second apart
+    if(_announceTimer)return;
     // ── THE SECOND CALL NOW BELONGS TO THE ODDS, NOT TO EDGE ──
     //
     // This used to run only with Edge pinned, because Edge was the only thing
@@ -14434,6 +14439,10 @@ function stopAllVoice(){
   try{ if(_announceTimer){clearTimeout(_announceTimer);_announceTimer=null;} }catch(e){}
   // treat this race as said, so the panel redrawing does not start it again
   try{ const sig=announceSig(); if(sig)window._lastSpokenSig=sig; }catch(e){}
+  // and as SILENCED, by the board rather than by the picks: the signature
+  // above carries the pair, and a pair that moves when the call locks would
+  // otherwise make this race "new" and speak it again
+  try{ window._silencedRace=boardSigNow(); }catch(e){}
   try{duckAudio(false);}catch(e){}
   try{document.querySelectorAll('.speaking').forEach(b=>b.classList.remove('speaking'));}catch(e){}
   showToast('🔇 Silent for this race — the next one speaks as usual','#8a8a8a');
@@ -18960,6 +18969,7 @@ function autoAnnounce(){
   // carry a race with it; announcing that one is talking over a screen
   // that exists to say "not yet".
   if(!appOnScreen()) return 'not on screen yet';
+  if(window._silencedRace&&window._silencedRace===boardSigNow()) return 'silenced for this race';
   const sig=announceSig();
   if(!sig) return 'no picks';
   if(window._lastSpokenSig===sig) return 'already announced';

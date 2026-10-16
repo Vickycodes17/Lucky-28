@@ -10548,6 +10548,27 @@ function settleOddsFor(r,vi){
 }
 
 /**
+ * Where each of a race's three vehicles sits on the board a reading came from.
+ *
+ * `cars` is the board's three names in the order its prices are in. The
+ * answer is, for each vehicle in race.vehicles order, its index into those
+ * prices - or null unless the race is exactly the board's three vehicles. A
+ * vehicle corrected by hand, or a board left over from a race that was never
+ * logged, is not this race's market, and pricing it by position would file
+ * one car's payout under another's name.
+ */
+function carLanes(race,cars){
+  if(!race||!race.vehicles||race.vehicles.length!==3||!cars||cars.length!==3)return null;
+  const idx=cars.map(function(c){
+    if(typeof c==='number')return c;
+    const n=String(c||'').trim().toLowerCase();
+    for(let i=0;i<ALL_VEHICLES.length;i++)if(ALL_VEHICLES[i].name.toLowerCase()===n)return i;
+    return -1; });
+  const lane=race.vehicles.map(function(v){ return idx.indexOf(v); });
+  return lane.every(function(i){ return i>=0; })?lane:null;
+}
+
+/**
  * Put the market a board closed on onto the race just logged from it.
  *
  * Only if it is the same three vehicles - a close left over from another
@@ -10555,14 +10576,9 @@ function settleOddsFor(r,vi){
  * order, which is how liveOdds is stored. True when something was attached.
  */
 function attachCloseMarket(race,cm){
-  if(!race||!cm||!cm.odds||cm.odds.length!==3||!race.vehicles||race.vehicles.length!==3)return false;
-  const idx=(cm.cars||[]).map(function(c){
-    if(typeof c==='number')return c;
-    const n=String(c||'').trim().toLowerCase();
-    for(let i=0;i<ALL_VEHICLES.length;i++)if(ALL_VEHICLES[i].name.toLowerCase()===n)return i;
-    return -1; });
-  const lane=race.vehicles.map(function(v){ return idx.indexOf(v); });
-  if(!lane.every(function(i){ return i>=0; }))return false;
+  if(!race||!cm||!cm.odds||cm.odds.length!==3)return false;
+  const lane=carLanes(race,cm.cars);
+  if(!lane)return false;
   race.closeOdds=lane.map(function(i){ return cm.odds[i]; });
   if(cm.bets&&cm.bets.length===3)race.closeBets=lane.map(function(i){ return cm.bets[i]; });
   if(typeof cm.secs==='number')race.closeSecs=cm.secs;
@@ -18653,13 +18669,23 @@ function guardStatsHTML(){
         if(hg){last.humanRoads=hg;touched=true;}   // what the Human model called, for scoring
         // whatever the watcher read off Chamet for this race
         if(window.__raceMeta){
-          if(window.__raceMeta.odds){last.liveOdds=window.__raceMeta.odds;touched=true;}
-          if(window.__raceMeta.bets){last.liveBets=window.__raceMeta.bets;touched=true;}
-          // The three track signs as the game actually published them. Two read
-          // "???" - if the real surface is ever behind one of them this is where
-          // it shows up, and knowing all three roads before the bet is worth
-          // about seventeen points, so it is worth keeping the receipts.
-          if(window.__raceMeta.signs){last.trackSigns=window.__raceMeta.signs;touched=true;}
+          const rm=window.__raceMeta;
+          // BY NAME, AND ONLY ON ITS OWN BOARD. The prices come in the board's
+          // order and a race stores them in its own, which is the same order
+          // only until a vehicle is tapped off and on again. A reader that
+          // names its cars is held to them: a race that is not those three
+          // vehicles gets none of this reading. One that does not (an older
+          // reader) is filed by position, as it always was.
+          const lane=rm.cars?carLanes(last,rm.cars):[0,1,2];
+          if(lane){
+            if(rm.odds&&rm.odds.length===3){last.liveOdds=lane.map(function(i){ return rm.odds[i]; });touched=true;}
+            if(rm.bets&&rm.bets.length===3){last.liveBets=lane.map(function(i){ return rm.bets[i]; });touched=true;}
+            // The three track signs as the game actually published them. Two read
+            // "???" - if the real surface is ever behind one of them this is where
+            // it shows up, and knowing all three roads before the bet is worth
+            // about seventeen points, so it is worth keeping the receipts.
+            if(rm.signs){last.trackSigns=rm.signs;touched=true;}
+          }
           window.__raceMeta=null;
         }
         // WHEN that last reading was taken, and how the money got there. The
@@ -18672,7 +18698,7 @@ function guardStatsHTML(){
           // >=0 as well as finite: the last frame before a board closes can carry
           // a clock that has already run past zero, and a race filed as "-4
           // seconds left" would poison the very question this is here to answer.
-          if(lm&&typeof lm.secs==='number'&&isFinite(lm.secs)&&lm.secs>=0){
+          if(lm&&carLanes(last,lm.cars)&&typeof lm.secs==='number'&&isFinite(lm.secs)&&lm.secs>=0){
             last.liveSecs=Math.round(lm.secs);touched=true;}
           const tr=raceTrailFor(lm&&lm.cars);
           if(tr){last.marketTrail=tr;touched=true;}
@@ -21019,6 +21045,13 @@ init();
   window.predictByKeyRaw=function(k,v,r,s){const p=pending(v,r,s);return p&&p.calls[k]?C.clone(p.calls[k]):baseByKey(k,v,r,s);};
   const oldVoiceKey=voiceModelKey;
   window.voiceModelKey=function(){const p=pending(sel3,selRoad,selSlot);return p?p.selectedKey:oldVoiceKey();};
+  // Once the call is locked, the pair the voice says and the price panel prices
+  // IS the locked pair - the one the race is recorded and the Value page is
+  // judged on. Otherwise the panel goes on pricing the pair drawn at fill time,
+  // before there was a market, and says "it counts" about a pair nobody kept.
+  const oldVoicePicks=voicePicks;
+  window.voicePicks=function(){const p=pending(sel3,selRoad,selSlot),c=p&&p.calls&&p.calls[p.selectedKey];
+    return (c&&c.vi!=null&&c.vi2!=null)?{vi1:c.vi,vi2:c.vi2}:oldVoicePicks();};
   const oldSpoken=window.noteSpokenPair;
   if(typeof oldSpoken==='function')window.noteSpokenPair=function(a,b){
     const result=oldSpoken.apply(this,arguments);
@@ -21080,7 +21113,12 @@ init();
       trainingCutoff:training().lastT,trainingRows:training().n,options:cfg()};
     try{if(window.RXARoadLab)window.RXARoadLab.onLock(snapshot);}catch(e){state.roadLabError=String(e.message||e);}
     state.bundlePending=C.clone(snapshot);
-    save();renderMemoClear();paintHome();return true;
+    save();renderMemoClear();paintHome();
+    // and the screen shows the locked call at once: the picks redrawn from the
+    // frozen calls, and the price panel rebuilt on the pair it now belongs to
+    try{showPredBox();}catch(e){}
+    try{priceInject();}catch(e){}
+    return true;
   }
   const reset=rxaBoardReset;
   window.rxaBoardReset=function(){
@@ -21473,6 +21511,25 @@ test('Timed lock is taken before the result and survives a changed model selecti
 test('Live agreement does not gain votes from the new descendant models',()=>{
   const x=fixture(),q=vm.runInContext("agreeShareNow('CONSENSUS')",x);
   assert.strictEqual(q.n,10);
+});
+test('Once the call locks, the voice and the price panel follow the locked pair the race is recorded on',()=>{
+  const x=fixture();
+  // the pair drawn at fill time is 0+1; the live board moves Consensus to 2+0 by the lock
+  vm.runInContext(`window._built=0;priceInject=()=>{window._built++;};
+    allModelPredictions=(v,r,s)=>allEnginePredictionsRaw(v,r,s).concat([{key:'CONSENSUS',vi:2,vi2:0,pct:60,pct2:20}]);
+    rxaBoardReset();__liveMarket={at:Date.now(),secs:12,odds:['2','3.3','5'],bets:['50','30','20']};rxaOddsChanged();`,x);
+  assert.deepStrictEqual(JSON.parse(vm.runInContext('JSON.stringify(voicePicks())',x)),{vi1:0,vi2:1},'before the lock: the fill-time pair');
+  assert.strictEqual(x._built,0);
+  vm.runInContext(`__liveMarket.secs=9;rxaOddsChanged();`,x);
+  assert(x.state.bundlePending,'locked at 9s');
+  assert.deepStrictEqual(JSON.parse(vm.runInContext('JSON.stringify(voicePicks())',x)),{vi1:2,vi2:0},'after it: the locked pair');
+  assert.strictEqual(x._built,1,'and the price panel is rebuilt on it at once');
+  x._clock+=3000;vm.runInContext(`selWinner=0;openOutcomeModal();`,x);
+  const r=x.state.results[0];
+  assert.strictEqual(r.selectedModel,'CONSENSUS');
+  assert.deepStrictEqual([r.engineCalls.CONSENSUS.vi,r.engineCalls.CONSENSUS.vi2],[2,0],'Value judges the same pair the panel priced');
+  assert.deepStrictEqual([r.predVi1,r.predVi2],[2,0]);
+  assert.deepStrictEqual(JSON.parse(vm.runInContext('JSON.stringify(voicePicks())',x)),{vi1:0,vi2:1},'no lock, no override');
 });
 test('A result without a prior lock cannot become a live bundle win',()=>{
   const x=fixture();vm.runInContext(`selWinner=0;openOutcomeModal();`,x);
@@ -24323,7 +24380,7 @@ test('A race is settled on the price it closed at, and a late drop under the flo
     guardSortedRaces=()=>state.results;aiScoredRace=()=>true;inCurrentMode=()=>true;usesAgreementGate=()=>false;
     selfTallyNew=()=>({});selfEstimate=()=>null;selfTallyAdd=()=>{};SELF_EDGE=0;rowName=k=>k;boardPriceOf=()=>null;
     SEL_LEVELS=[];valueConsGuard=()=>true;VALUE_MIN_ROWS=25;`,env);
-  for(const f of ['raceOddsFor','settleOddsFor','attachCloseMarket','valuePasses','pairReturn','valueLow','valueHigh','valueSection'])
+  for(const f of ['raceOddsFor','settleOddsFor','carLanes','attachCloseMarket','valuePasses','pairReturn','valueLow','valueHigh','valueSection'])
     vm.runInContext(fnSrc(f),env);
   vm.runInContext(html.match(/const VALUE_LOW_DEF=[^;]*;/)[0].replace('const ','var '),env);
   assert.strictEqual(env.VALUE_LOW_DEF,1.7,'the floor is 1.7 unless the slider was moved');
@@ -24337,6 +24394,12 @@ test('A race is settled on the price it closed at, and a late drop under the flo
   assert.strictEqual(r1.closeLagMs,30);assert.strictEqual(r1.closeSrc,'last-open-frame');
   assert(!env.attachCloseMarket({vehicles:[3,2,4]},{cars:['SUV','ORV','Car'],odds:['1','2','3']}),
          'a close from another board is never filed against this race');
+  // the live reading is filed the same way: by name, and only on its own board
+  const lanes=(v)=>{ const l=env.carLanes({vehicles:v},['SUV','ORV','Car']); return l?Array.from(l):l; };
+  assert.deepStrictEqual(lanes([3,2,1]),[0,1,2],'the bot fills in board order');
+  assert.deepStrictEqual(lanes([2,1,3]),[1,2,0],'a car tapped off and on again is still priced as itself');
+  assert.strictEqual(lanes([3,1,8]),null,'a car corrected by hand: this reading is not its market');
+  assert.strictEqual(lanes([0,4,5]),null,'a board that was never logged: none of it belongs to this race');
   const dropped=race(r1.closeOdds), held=race(['1.7/2.7','2.8/2.5','5.4/2.5']), old=race(undefined);
   assert.strictEqual(env.raceOddsFor(dropped,3),1.7,'the last open reading is untouched');
   assert.strictEqual(env.settleOddsFor(dropped,3),1.6,'and the race settles on the close');

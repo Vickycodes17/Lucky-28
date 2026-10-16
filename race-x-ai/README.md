@@ -23,8 +23,14 @@ This repo is public, so neither secret is in the code. Add both under
   `closeAt`), next to the last open reading (`liveOdds`).
 - The Value page counts a race on the price it **closed** at. A pick that read
   1.7 at "1s" and closed at 1.6 is not counted under a 1.7 floor.
+- The Price panel and the Value page price the same two vehicles. When the
+  call locks with 10 seconds left, the panel and the voice switch to the
+  locked pair, which is the pair the race is recorded and judged on.
+- Prices are filed by vehicle name, and only on the board they were read from.
+  A race whose vehicles were corrected by hand, or that was never read, gets
+  no price, and Value leaves it out rather than guessing.
 
 Both halves are checked before the APK is built:
 
-- 38 board-reader checks run on a desktop (`desktop-check/RaceWatcherCheck.java`).
+- 55 board-reader checks run on a desktop (`desktop-check/RaceWatcherCheck.java`).
 - The embedded `rxa-*-tests` scripts in `index.html` run in Node.

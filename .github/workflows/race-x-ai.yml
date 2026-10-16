@@ -2202,7 +2202,9 @@ jobs:
           "      // exactly as it always did.\n" +
           "      // Which three vehicles this board is, so a price reading arriving a\n" +
           "      // moment later can be checked against it rather than assumed to belong.\n" +
-          "      try { window.__lastFillCars = (cars || []).slice(); window.__liveMarket = null; window.__closeMarket = null; } catch (e) { }\n" +
+          "      // __raceMeta goes too: a reading left over from a board that was never\n" +
+          "      // logged must not be filed against this one.\n" +
+          "      try { window.__lastFillCars = (cars || []).slice(); window.__liveMarket = null; window.__closeMarket = null; window.__raceMeta = null; } catch (e) { }\n" +
           "      // and the trail of how the last board's money formed starts over\n" +
           "      try { if (typeof window.rxaBoardReset === 'function') window.rxaBoardReset(); } catch (e) { }\n" +
           "      var run = function () { return fillNow(cars, road, slot); };\n" +
@@ -2273,9 +2275,19 @@ jobs:
           "     *\n" +
           "     * Called repeatedly within one board now, whenever the prices move.\n" +
           "     */\n" +
-          "    meta: function (odds, bets, signs, secs, readAt, tickAt) {\n" +
+          "    meta: function (odds, bets, signs, secs, readAt, tickAt, boardCars) {\n" +
           "      try {\n" +
-          "        window.__raceMeta = { odds: odds || null, bets: bets || null, signs: signs || null };\n" +
+          "        // WHICH BOARD THIS IS. The reader names its three cars on every reading,\n" +
+          "        // in the order of the prices. The page learns them from the fill, and a\n" +
+          "        // page reloaded since has forgotten them: no live panel, and a close it\n" +
+          "        // cannot place. The reader's word puts them back. An older reader sends\n" +
+          "        // none, and then the fill's are all there is.\n" +
+          "        if (boardCars && boardCars.length === 3) window.__lastFillCars = boardCars.slice();\n" +
+          "        // with the three cars it was read for, in the order the prices are in,\n" +
+          "        // so the race is priced by name when it is logged, never by position\n" +
+          "        var fillCars = window.__lastFillCars || null;\n" +
+          "        window.__raceMeta = { odds: odds || null, bets: bets || null, signs: signs || null,\n" +
+          "                              cars: (fillCars && fillCars.length === 3) ? fillCars.slice() : null };\n" +
           "        // the seconds left on the board, or null when the watcher could not read them\n" +
           "        var left = (typeof secs === 'number' && isFinite(secs) && secs >= 0) ? secs : null;\n" +
           "        // WHEN THE SCREEN WAS READ, not when this line got to run. The page can\n" +
@@ -2334,6 +2346,14 @@ jobs:
           "                  lastOpenAt: (lastOpenAt > 0) ? lastOpenAt : null,\n" +
           "                  closedAt: (closedAt > 0) ? closedAt : Date.now(),\n" +
           "                  src: fromFrame ? 'closing-frame' : 'last-open-frame', gotAt: Date.now() };\n" +
+          "        // AN OPEN BOARD READ AFTER THIS CLOSE HAS ALREADY ARRIVED. Readings are\n" +
+          "        // sent newest-wins, so one that the reader took after this frame can be\n" +
+          "        // carried by a call queued before it, and run first. Then this close was\n" +
+          "        // a frame caught mid-redraw and betting is still open; the real close is\n" +
+          "        // still to come. A real one is never older than the readings before it.\n" +
+          "        var seenOpen = window.__liveMarket;\n" +
+          "        if (seenOpen && seenOpen.cars && seenOpen.cars.join('|') === c.cars.join('|') &&\n" +
+          "            seenOpen.readAt > c.closedAt && !seenOpen.closed) return 'superseded';\n" +
           "        window.__closeMarket = c;\n" +
           "        // The live panel shows the closing market from here on, and says so.\n" +
           "        try {\n" +
@@ -4102,9 +4122,13 @@ jobs:
                    * because two of them read "???" and whether the real surface is hidden
                    * behind that placeholder decides whether ~94% is reachable or ~80% is
                    * the ceiling - a question worth answering from data.
+                   *
+                   * `cars` are the board's three vehicles in the order the prices are in,
+                   * on every reading, so a page that was reloaded after the fill still
+                   * knows which board the prices belong to.
                    */
                   void raceMeta(List<String> odds, List<String> bets, List<String> signs, String countdown,
-                                long readAt, long tickAt);
+                                long readAt, long tickAt, List<String> cars);
                   /**
                    * Betting on this board has closed, and this is the market it closed on.
                    *
@@ -4384,7 +4408,7 @@ jobs:
                               sentBets = new ArrayList<>(f.bets);
                               sentClock = f.countdown;
                               metaSent++;
-                              listener.raceMeta(f.odds, f.bets, f.signs, f.countdown, seen, tickAt);
+                              listener.raceMeta(f.odds, f.bets, f.signs, f.countdown, seen, tickAt, f.cars);
                           }
                           return;
                       }
@@ -4405,7 +4429,7 @@ jobs:
                       sentClock = f.countdown;
                       listener.fillAndSpeak(f.cars, f.road, f.slot);
                       metaSent++;
-                      listener.raceMeta(f.odds, f.bets, f.signs, f.countdown, seen, tickAt);
+                      listener.raceMeta(f.odds, f.bets, f.signs, f.countdown, seen, tickAt, f.cars);
                       return;
                   }
 
@@ -5452,9 +5476,9 @@ jobs:
                */
               @Override
               public void raceMeta(List<String> odds, List<String> bets, List<String> signs, String countdown,
-                                   long readAt, long tickAt) {
+                                   long readAt, long tickAt, List<String> cars) {
                   MainActivity.jsLatest("meta", "RaceAuto.meta(" + arr(odds) + "," + arr(bets) + "," + arr(signs)
-                                + "," + RaceReader.seconds(countdown) + "," + readAt + "," + tickAt + ")");
+                                + "," + RaceReader.seconds(countdown) + "," + readAt + "," + tickAt + "," + arr(cars) + ")");
               }
 
               /** The market the board closed on. Never replaced by a later call - it is sent once. */
@@ -5801,14 +5825,14 @@ jobs:
               /** Everything the watcher said, in order. */
               static class Rec implements RaceWatcher.Listener {
                   final List<String> log = new ArrayList<>();
-                  List<String> lastOdds, lastBets, closeOdds, closeBets;
+                  List<String> lastOdds, lastBets, lastCars, closeOdds, closeBets;
                   long lastReadAt, lastTickAt, closeOpenAt, closeAt;
                   int closeSecs = -99, metas = 0, closesN = 0;
                   boolean closeFromFrame;
                   public void fillAndSpeak(List<String> cars, String road, int slot) { log.add("fill " + cars); }
                   public void raceMeta(List<String> odds, List<String> bets, List<String> signs, String countdown,
-                                       long readAt, long tickAt) {
-                      metas++; lastOdds = odds; lastBets = bets; lastReadAt = readAt; lastTickAt = tickAt;
+                                       long readAt, long tickAt, List<String> cars) {
+                      metas++; lastOdds = odds; lastBets = bets; lastReadAt = readAt; lastTickAt = tickAt; lastCars = cars;
                       log.add("meta " + countdown + " " + odds + " " + bets);
                   }
                   public void marketClosed(List<String> odds, List<String> bets, int secs,
@@ -5867,6 +5891,8 @@ jobs:
                       w.feed(board(true, "3s", odds, o("50,100", "33,000", "17,000")), t += 40);
                       check(r.metas == before + 1, "a pool that moved is sent even when no price or second changed");
                       check(r.lastReadAt == t, "each reading carries the moment the screen was read");
+                      check(r.lastCars != null && ("fill " + r.lastCars).equals(r.log.get(0)),
+                            "and names the three cars it was read for, in the order of its prices");
                       w.feed(board(true, "3s", odds, o("50,100", "33,000", "17,000")), t += 40);
                       check(r.metas == before + 1, "an identical frame sends nothing");
                       while (t + 40 < t0 + 1000) w.feed(board(true, "3s", odds, o("50,100", "33,000", "17,000")), t += 40);

@@ -22136,7 +22136,10 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
         if (x != null) w = (w + (x + 1) * ((i & 1023) + 1)) | 0;
       }
       var last = R[R.length - 1] || {};
-      return s + ':' + w + ':' + (last.t || 0) + ':' + ((state && state.accResetT) || 0);
+      /* the newest race's prices too - they land a moment after the race does,
+         and a row cached in between kept that race unpriced until the next one */
+      return s + ':' + w + ':' + (last.t || 0) + ':' + (last.liveOdds ? 1 : 0) + (last.closeOdds ? 1 : 0)
+           + ':' + ((state && state.accResetT) || 0);
     }
     function copyRows(rows){
       var out = new Array(rows.length);
@@ -23974,10 +23977,10 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
         : v.knife ? ('Right on the floor ('+Math.min(v.x1,v.x2).toFixed(2)+') — one late bet can push it under '+lo.toFixed(1)+'.')
         : ((v.pass?'Both pay enough. ':'Too short — '+v.why+'. ')+
            'A split returns '+v.ret.toFixed(2)+'× if either wins. Read '+Math.max(0,Math.round(v.age))+'ms ago.'));
-      // keep the clock running while betting is open and the reading is live;
-      // once it has run down or gone stale, a slow timer is enough to say so -
-      // never 60 frames a second for a clock that is not moving
-      if(!v.closed&&v.clock&&v.clock.ms>0&&!v.stale)again=true;
+      // keep the clock running while it has time left - a stale reading still
+      // has a clock that is moving, and it reaches 0 on its own. Once it is at
+      // 0 (or there is no clock) a slow timer is enough to keep the note honest.
+      if(!v.closed&&v.clock&&v.clock.ms>0&&v.age<60000)again=true;
       else if(!v.closed&&v.age<60000&&!slowT)
         slowT=setTimeout(function(){ slowT=0; kick(); },v.stale?1000:Math.max(50,STALE_MS-v.age+20));
     }catch(e){}

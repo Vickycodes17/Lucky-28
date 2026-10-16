@@ -22000,7 +22000,11 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
     function sig(){
       var R = (typeof state !== 'undefined' && state.results) || [];
       var last = R[R.length - 1] || {};
+      /* and whether the newest race has its prices yet: they are attached a
+         moment AFTER the race is appended, and a scan taken in between was
+         cached with no prices for it until the next race came along */
       return R.length + '|' + (last.t || 0) + '|' + (last.winner == null ? '-' : last.winner)
+           + '|' + (last.liveOdds ? 1 : 0) + (last.closeOdds ? 1 : 0)
            + '|' + ((state && state.accResetT) || 0)
            + '|' + (typeof instantOn === 'function' ? (instantOn() ? 1 : 0) : 0);
     }
@@ -23105,7 +23109,11 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
     function sig(){
       var R = (typeof state !== 'undefined' && state.results) || [];
       var last = R[R.length - 1] || {};
+      /* and whether the newest race has its prices yet: they are attached a
+         moment AFTER the race is appended, and a scan taken in between was
+         cached with no prices for it until the next race came along */
       return R.length + '|' + (last.t || 0) + '|' + (last.winner == null ? '-' : last.winner)
+           + '|' + (last.liveOdds ? 1 : 0) + (last.closeOdds ? 1 : 0)
            + '|' + ((state && state.accResetT) || 0)
            + '|' + (typeof instantOn === 'function' ? (instantOn() ? 1 : 0) : 0);
     }
@@ -23960,7 +23968,7 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
       }
       set(q('note'),
         v.closed ? ('Betting closed at '+v.a.toFixed(1)+' and '+v.b.toFixed(1)+
-                    ' — the race is counted on these. '+(v.pass?'Both cleared their bars.':'Not counted: '+v.why+'.'))
+                    ' — the race is judged on these. '+(v.pass?'Both cleared their bars: it counts.':'Not counted: '+v.why+'.'))
         : v.stale ? ('No reading for '+(v.age/1000).toFixed(1)+'s — is Chamet still on screen?')
         : dropping ? ('The price just moved — '+v.why+' — this is no longer a bet.')
         : v.knife ? ('Right on the floor ('+Math.min(v.x1,v.x2).toFixed(2)+') — one late bet can push it under '+lo.toFixed(1)+'.')

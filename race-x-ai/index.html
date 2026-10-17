@@ -3895,6 +3895,7 @@ async function loadCloudRaces(){
           // then read undefined, and the setup page throws outright.
           const _wr=state.winRates, _px=state.payouts;
           state=Object.assign({showSpeed:false},cloud||{});
+          try{ historyMemoClear(); recalcAllRates(); }catch(e){}
           state.results=cleanResults(cloud&&cloud.results);
           if(!state.winRates||!Object.keys(state.winRates).length)state.winRates=_wr||{};
           if(!state.payouts ||!Object.keys(state.payouts ).length)state.payouts =_px||{};
@@ -3970,7 +3971,9 @@ async function loadCloudRaces(){
         // The races are the other account's; the rate tables are the game's.
         state.results=[];
         state.ownerUid=currentUser.id;
-        try{save();}catch(e){}
+        // written NOW: maybeOfferImport below reads storage, and a queued write
+        // would let it find the other account's races and offer to upload them
+        try{save();saveNow();}catch(e){}
         _cloudChanged=true;
         try{ showToast('\ud83d\udd04 New account \u2014 starting with no races','#7C6FFF',4000); }catch(e){}
       }else{
@@ -4079,6 +4082,8 @@ async function cloudSave(){
 function maybeOfferImport(){
   try{
     const local=JSON.parse(localStorage.getItem('chametFinal')||'null');
+    // another account's races are never this one's to import, whatever is on disk
+    if(local&&local.ownerUid&&currentUser&&local.ownerUid!==currentUser.id)return;
     if(local&&local.results&&local.results.length>0){
       if(confirm(`Import your ${local.results.length} locally-saved races to the cloud?`)){
         state=Object.assign({showSpeed:false},local);
@@ -7469,14 +7474,17 @@ function idleRun(g, done) {
  * asks first, surfModel() fits it there and then exactly as it always did, and
  * this one, finishing later, does not overwrite the newer fit.
  */
+let _surfGen = 0;   // bumped whenever the history is rewritten: a fit begun before is not used
 function surfModelSoon() {
   const races = surfRaces();
   if (races.length < SURF_MIN_RACES) return;
   if (_surfFit && races.length - _surfFit.n < SURF_REFIT_EVERY) return;
   if (window.__surfJob) return;
   window.__surfJob = true;
+  const gen = _surfGen;
   idleRun(surfTrainGen(races, _surfFit ? _surfFit.W : null), function (W) {
     window.__surfJob = false;
+    if (gen !== _surfGen) { try { surfModelSoon(); } catch (e) { } return; }
     if (_surfFit && _surfFit.n >= races.length) return;
     _surfFit = { n: races.length, W: W, pairs: surfPairs(races) };
   });
@@ -7487,8 +7495,10 @@ function surfWidthModelSoon() {
   if (_surfWFit && races.length - _surfWFit.n < SURF_REFIT_EVERY) return;
   if (window.__surfWJob) return;
   window.__surfWJob = true;
+  const gen = _surfGen;
   idleRun(surfWidthTrainGen(races, _surfWFit ? _surfWFit.W : null), function (W) {
     window.__surfWJob = false;
+    if (gen !== _surfGen) { try { surfWidthModelSoon(); } catch (e) { } return; }
     if (_surfWFit && _surfWFit.n >= races.length) return;
     _surfWFit = { n: races.length, W: W, pairs: surfPairs(races), shares: slotShareMeans(races) };
   });
@@ -11824,7 +11834,7 @@ function allEnginePredictions(vis,roadI,slotI){
 // whole app getting slower the day Edge arrived.
 const BASE_ENGINES=ENGINES.filter(function(e){ return e.key!=='EDGE'; });
 function allEnginePredictionsRaw(vis,roadI,slotI){
-  return BASE_ENGINES.map(e=>{try{const r=e.fn(vis.slice(),roadI,slotI);return{key:e.key,name:e.name,vi:r.vi,pct:r.pct,vi2:r.vi2,pct2:r.pct2};}catch(err){return{key:e.key,name:e.name,vi:null,pct:0,vi2:null,pct2:0};}});
+  return BASE_ENGINES.map(e=>{try{const r=e.fn(vis.slice(),roadI,slotI);const o={key:e.key,name:e.name,vi:r.vi,pct:r.pct,vi2:r.vi2,pct2:r.pct2};if(r.pct3!=null)o.pct3=r.pct3;return o;}catch(err){return{key:e.key,name:e.name,vi:null,pct:0,vi2:null,pct2:0};}});
 }
 // per-engine accuracy — counts a HIT if EITHER of the 2 picks won.
 // Only counts races where the AI actually made engine predictions, and only
@@ -12783,7 +12793,7 @@ function showPredBox(){
     RISK:'Risk',BRAIN:'Human Brain'};
   // build a lookup for each model's picks
   const pickOf={};
-  engs.forEach(e=>{pickOf[e.key]={vi:e.vi,vi2:e.vi2,pct:e.pct,pct2:e.pct2};});
+  engs.forEach(e=>{pickOf[e.key]={vi:e.vi,vi2:e.vi2,pct:e.pct,pct2:e.pct2,pct3:e.pct3};});
   // consensus pick computed above (cv1/cv2)
   pickOf['CONSENSUS']={vi:consensusPicks.vi1,vi2:consensusPicks.vi2,pct:null,pct2:null};
 
@@ -12846,7 +12856,8 @@ function showPredBox(){
     }else{
       const at=p.allThree||[];
       const findPct=(vi)=>{const f=at.find(x=>x.vi===vi);return f?f.pct:null;};
-      pctC=findPct(third);
+      // a model that knows its own third chance (the Human Brain) shows it
+      pctC=(pk.pct3!=null)?pk.pct3:findPct(third);
     }
     // radio: pick which model auto-voice announces
     const isVoice=voiceModelKey()===key;
@@ -13245,6 +13256,8 @@ function historyKeyNow(){
     (last.predictionOrigin||'-')+(last.engineCalls?Object.keys(last.engineCalls).length:0);
   return R.length+':'+w+':'+(last.t||0)+':'+lk+':'+(window.rxCallsGen||0)+':'+(state.accResetT||0)+':'+mode;
 }
+/** For a change the key cannot see: forget every history answer. */
+function historyMemoClear(){ _histCache={key:null,v:{}}; }
 function historyMemo(name,fn){
   let key=null;
   try{ key=historyKeyNow(); }catch(e){}
@@ -15536,7 +15549,9 @@ function deleteRace(t,num){
  */
 function recalcAllRates(){
   try{ invalidateWR(); }catch(e){}
-  try{ _surfFit=null; _surfWFit=null; }catch(e){}
+  // and any background fit still running on the history as it was is dropped
+  try{ _surfFit=null; _surfWFit=null; _surfGen++; }catch(e){}
+  try{ historyMemoClear(); }catch(e){}
   try{ invalidateRoadTable(); }catch(e){}
 }
 
@@ -17431,6 +17446,7 @@ function boardBandTable(){
  */
 function toggleRoadInGuard(){
   state.roadInGuard=(state.roadInGuard===false);
+  try{ historyMemoClear(); }catch(e){}
   save();
   showToast(state.roadInGuard!==false
     ? '🛣️ Road counted — a road that has been kind lifts the confidence'
@@ -17476,7 +17492,8 @@ function guardFeat(r){
          board:bp?bp.sum:null,share:sh,
          hit:(c.vi===r.winner||c.vi2===r.winner)};
 }
-function guardRaces(){ return historyMemo('guardRaces',guardRacesRaw); }
+// the road setting is baked into each row's road lift, so it is part of the name
+function guardRaces(){ return historyMemo('guardRaces'+(state.roadInGuard===false?':0':':1'),guardRacesRaw); }
 function guardRacesRaw(){
   const cutoff=state.accResetT||0;
   return state.results

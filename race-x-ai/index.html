@@ -13238,7 +13238,12 @@ function historyKeyNow(){
   // board on screen threw them away on every fill - the moment it matters most
   let mode='';
   try{ mode=(instantOn()?1:0)+''+(state.simpleMode?1:0)+(state.ownModel?1:0); }catch(e){}
-  return R.length+':'+w+':'+(last.t||0)+':'+(window.rxCallsGen||0)+':'+(state.accResetT||0)+':'+mode;
+  // and what lands on the newest race a moment after it is logged - its
+  // prices, its strength, the frozen calls - so a cache built in between is
+  // not kept with that race half-filled
+  const lk=(last.liveOdds?1:0)+''+(last.closeOdds?1:0)+(last.betStr||'-')+(last.predConf1!=null?1:0)+
+    (last.predictionOrigin||'-')+(last.engineCalls?Object.keys(last.engineCalls).length:0);
+  return R.length+':'+w+':'+(last.t||0)+':'+lk+':'+(window.rxCallsGen||0)+':'+(state.accResetT||0)+':'+mode;
 }
 function historyMemo(name,fn){
   let key=null;

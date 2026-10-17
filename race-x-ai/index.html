@@ -2925,7 +2925,7 @@ function menuGo(what){
       'board can be switched off.</p>'+
 
       '<h4>&#127942; THE MODELS</h4>'+
-      '<p><b>Twelve models and seven consensus rows</b> run on every race, each carrying its own '+
+      '<p><b>Fourteen models and seven consensus rows</b> run on every race, each carrying its own '+
       'live accuracy, longest losing run and last ten:</p>'+
       '<p><b>Payout</b> &mdash; the price list against the win rate.<br>'+
       '<b>Upgraded &#11088;</b> &mdash; the all-round model, and the app&rsquo;s headline pick.<br>'+
@@ -2937,6 +2937,9 @@ function menuGo(what){
       '<b>Road Expert</b> &mdash; follows whichever model has been best on this road.<br>'+
       '<b>Risk</b> &mdash; ranks by chance &times; payout, so it strays onto a longer price when '+
       'the price justifies it.<br>'+
+      '<b>&#129504; Human Brain</b> &mdash; thinks about the two hidden roads first, from a memory of the '+
+      'roads seen lately, pictures every track they could make and races the three on each. It takes '+
+      'the risky vehicle when the hidden roads probably suit it, and it votes in every Consensus row.<br>'+
       '<b>Numbers &#128290;</b> &mdash; reads only the run of winning positions. It has scored '+
       '31% over 891 races, below the 33% you get by guessing, and gets no vote.</p>'+
       '<p><b>Consensus</b> rows vote across different sets of the above &mdash; Consensus 6, '+
@@ -3151,7 +3154,12 @@ function menuGo(what){
       '<p>Payout logic plus <b>recent form</b>. It nudges its picks toward vehicles that have been winning lately and away from ones on a losing run.</p>'+
 
       '<h4>&#129353; CONSENSUS</h4>'+
-      '<p>A <b>vote</b> among the five base models. Each model gives 2 points to its top pick and 1 to its backup; the highest totals win. Meta models are deliberately excluded so nothing is counted twice.</p>'+
+      '<p>A <b>vote</b> among the six base models (Payout, Road, both Blends, Upgraded and Human Brain). Each model gives 2 points to its top pick and 1 to its backup; the highest totals win. Meta models are deliberately excluded so nothing is counted twice.</p>'+
+
+      '<h4>&#129504; HUMAN BRAIN</h4>'+
+      '<p>Thinks the way a person at the board does. Only one road is on show, so it first asks what the <b>two hidden roads</b> will be, from a memory of every road it has seen lately that fades by half every five races. It pictures all 36 ways they could fall on the last 40 track layouts it has seen, races the three vehicles on each by the speed chart, and plays the two that win most of them.</p>'+
+      '<p>That is why it will back the vehicle the others drop &mdash; a Supercar behind a Potholes sign after a run of fast roads &mdash; and its row says so: <b>&#127922; RISK PICK</b> and the roads that make it, or the vehicle it left out and when that one would win. It never reads the crowd&rsquo;s money.</p>'+
+      '<p style="font-size:11px;color:#8a8a8a">Walk-forward on 2,159 real races, tuned on the first 1,175 and then run on the other 984 unchanged: 83.3% of pairs right, against 81.1% for Human and 79.5% for Consensus on the same races. Its record on races logged before it existed is a replay of exactly that kind, marked as such.</p>'+
 
       '<h4>&#128739;&#65039; ROAD</h4>'+
       '<p>Looks only at the <b>revealed road</b>. Some vehicles genuinely do better on Desert than Highway, and this model tracks that from your own logs.</p>'+
@@ -4368,10 +4376,31 @@ function numIn(v){
  * reads its write back and warns; the race path never did.
  */
 let _saveFailWarned=false;
+/**
+ * ONE WRITE PER MOMENT, NOT ONE PER CALLER.
+ *
+ * Filling a board used to write the whole history to storage three times in a
+ * row - the board reset, the bundle's reset and the fill each saved - and the
+ * 10-second reading twice more. That is the entire history, a couple of
+ * megabytes, turned into text and written each time, on the very screens that
+ * have to stay smooth.
+ *
+ * So save() marks the state dirty and the write happens once, at the end of
+ * whatever is running now - before the phone does anything else, so nothing is
+ * at risk that was not at risk before. saveNow() writes straight away, for the
+ * one place that reads its own write back.
+ */
+let _saveQueued=false;
 function save(){
   // Any change worth saving is a change the cached verdicts may have been
   // computed from. Cheaper to drop them than to reason about which.
   try{ renderMemoClear(); }catch(e){}
+  if(_saveQueued)return;
+  _saveQueued=true;
+  try{ Promise.resolve().then(saveNow); }catch(e){ saveNow(); }
+}
+function saveNow(){
+  _saveQueued=false;
   try{
     localStorage.setItem('chametFinal',JSON.stringify(state));
     if(state.phase==='log')markUsed();
@@ -5020,7 +5049,7 @@ function confirmSetup(){
     showToast('Check '+bad.slice(0,2).join(' and ')+(bad.length>2?' +'+(bad.length-2)+' more':''),'#FF5F6D');
     return;
   }
-  state.winRates=wr;state.payouts=px;state.phase='log';save();
+  state.winRates=wr;state.payouts=px;state.phase='log';save();saveNow();   // read back below, so written now
   // kept outside the blob a reset deletes, so this is the last time these
   // eighteen numbers have to be typed
   rememberRates(wr,px,'typed');
@@ -5603,7 +5632,7 @@ function playedStats(){
     });
     if(!hist.length)return;
     const w=hist.filter(Boolean).length;
-    out.push({key:k,name:NM[k]||k,won:w,total:hist.length,
+    out.push({key:k,name:NM[k]||rowName(k),won:w,total:hist.length,
               pct:Math.round(w/hist.length*100),last10:hist.slice(-10)});
   });
   out.sort((a,b)=>b.pct-a.pct);
@@ -6464,6 +6493,9 @@ function posnumBacktest(forceMethod){
  * live for, so it is the marker; the others are there for histories from before
  * Consensus was stored.
  */
+// Counted as its own record, never as agreement the race had at the time.
+const AGREE_SKIP_KEYS=['BRAIN'];
+function replayedCall(r,k){ return k==='BRAIN'&&!!(r&&r.replayOrigins&&r.replayOrigins[k]); }
 function aiScoredRace(r){
   const e=r&&r.engineCalls;
   if(!e)return false;
@@ -6585,7 +6617,7 @@ function roadExpertBackfill(quiet){
     // ── then learn from it ──
     keys.forEach(k=>{
       const c=r.engineCalls[k];
-      if(!c||c.vi==null)return;
+      if(!c||c.vi==null||replayedCall(r,k))return;
       const h=(c.vi===r.winner)?1:0;
       hit[k]+=h; n[k]++;
       if(ri!=null){
@@ -6649,6 +6681,67 @@ function patchBackfill(quiet){
   return filled;
 }
 
+/**
+ * Give the Human Brain a record on races logged before it existed.
+ *
+ * Each old race is predicted from the races BEFORE it and nothing else - the
+ * same engine, handed the prefix - so the record is what it would have called
+ * at the time, and it is tagged as a replay so nothing mistakes it for a call
+ * that was live. Every other model's and every Consensus row's stored calls are
+ * left exactly as they were.
+ *
+ * IN SLICES, NEVER IN ONE GO. A long history is a second of work on a phone,
+ * and a second with the screen frozen is a hang. So it does a few races at a
+ * time while the phone is idle - under 8ms a slice, well inside one frame - and
+ * the app stays smooth while it fills in. Calling it again while it runs does
+ * nothing.
+ */
+let _brainFill=null;
+function brainBackfill(quiet){
+  if(_brainFill)return 0;
+  const cutoff=state.accResetT||0;
+  const want=r=>r&&r.winner!=null&&(r.t||0)>=cutoff&&r.engineCalls&&!r.engineCalls.BRAIN&&
+    aiScoredRace(r)&&r.vehicles&&r.vehicles.length===3&&r.road!=null&&r.slot!=null;
+  if(!(state.results||[]).some(want))return 0;
+  const all=(state.results||[]).filter(Boolean).slice().sort((a,b)=>(a.t||0)-(b.t||0));
+  const job=_brainFill={i:0,filled:0,prefix:[]};
+  const later=(typeof requestIdleCallback==='function')
+    ? function(f){ requestIdleCallback(f,{timeout:300}); }
+    : function(f){ setTimeout(f,16); };
+  const step=function(deadline){
+    if(_brainFill!==job)return;
+    const t0=Date.now();
+    const budget=Math.min(8,(deadline&&deadline.timeRemaining)?Math.max(2,deadline.timeRemaining()):8);
+    while(job.i<all.length&&Date.now()-t0<budget){
+      const r=all[job.i++];
+      if(want(r)){
+        let c=null;
+        try{ c=engBRAIN(r.vehicles.slice(),r.road,r.slot,job.prefix); }catch(e){}
+        if(c&&c.vi!=null&&c.vi2!=null){
+          r.engineCalls.BRAIN={vi:c.vi,vi2:c.vi2};
+          r.replayOrigins=r.replayOrigins||{};
+          r.replayOrigins.BRAIN={version:'BRAIN-backfill-1',origin:'replay',historicalInputsVerified:false};
+          job.filled++;
+        }
+      }
+      job.prefix.push(r);
+    }
+    if(job.i<all.length){ later(step); return; }
+    _brainFill=null;
+    if(!job.filled)return;
+    window.rxCallsGen=(window.rxCallsGen||0)+1;
+    try{invalidateRoadTable();}catch(e){}
+    try{_selfTallyCache=null;}catch(e){}
+    try{if(window.RXABundle&&RXABundle._invalidate)RXABundle._invalidate();}catch(e){}
+    try{renderMemoClear();}catch(e){}
+    save();
+    if(!quiet)showToast('🧠 Human Brain scored across '+job.filled+' past races','#00E5A0');
+    try{refreshActiveTab();}catch(e){}
+  };
+  later(step);
+  return 0;
+}
+
 function consensusBackfill(quiet){
   const races=(state.results||[]).filter(r=>r&&r.winner!=null&&aiScoredRace(r)&&
     NEW_CONSENSUS.some(k=>!r.engineCalls[k]));
@@ -6658,7 +6751,7 @@ function consensusBackfill(quiet){
     // rebuild the shape allEnginePredictions returns, from what was stored
     const eps=ENGINES.map(e=>{
       const c=r.engineCalls[e.key];
-      return c?{key:e.key,vi:c.vi,vi2:c.vi2}:null;
+      return (c&&!replayedCall(r,e.key))?{key:e.key,vi:c.vi,vi2:c.vi2}:null;
     }).filter(Boolean);
     if(eps.length<3)return;                     // too little of the race survives
     NEW_CONSENSUS.forEach(k=>{
@@ -7116,7 +7209,8 @@ function surfRaces() {
  * being run. Ridge-penalised, because a vehicle that has only raced twice on
  * Dirt should not be handed a strong opinion about Dirt.
  */
-function surfTrain(races, warmFrom) {
+function surfTrain(races, warmFrom) { return genRun(surfTrainGen(races, warmFrom)); }
+function* surfTrainGen(races, warmFrom) {
   const NV = ALL_VEHICLES.length, NR = ROADS.length;
   // Start from the last solution rather than from nothing. The answer moves very
   // little when 25 more races arrive, so a warm start converges in a fraction of
@@ -7168,6 +7262,7 @@ function surfTrain(races, warmFrom) {
     }
     // gradient, then the ridge pull, then one step scaled by the number of races
     for (let j = 0; j < g.length; j++) W[j] += LR * (g[j] - RIDGE * W[j]) / tot;
+    yield;   // a place to stop, so the fit can be done a slice at a time
   }
   return W;
 }
@@ -7241,7 +7336,8 @@ function slotShares(r) {
   return per.map(x => x / tot);
 }
 
-function surfWidthTrain(races, warmFrom) {
+function surfWidthTrain(races, warmFrom) { return genRun(surfWidthTrainGen(races, warmFrom)); }
+function* surfWidthTrainGen(races, warmFrom) {
   const NV = ALL_VEHICLES.length, NR = ROADS.length;
   const W = (warmFrom && warmFrom.length === NV * NR)
     ? Float64Array.from(warmFrom) : new Float64Array(NV * NR);
@@ -7309,6 +7405,7 @@ function surfWidthTrain(races, warmFrom) {
       }
     }
     for (let j = 0; j < g.length; j++) W[j] += LR * (g[j] - RIDGE * W[j]) / tot;
+    yield;
   }
   return W;
 }
@@ -7342,13 +7439,70 @@ function surfWidthModel() {
  * video call. The model barely moves for one more race, so the rebuild can wait
  * for a quiet moment - and it happens at most once every 25 races anyway.
  */
+/** Run a generator to the end, straight through: the fit as it always was. */
+function genRun(g) { let x; do { x = g.next(); } while (!x.done); return x.value; }
+/**
+ * Run a generator a slice at a time while the phone is idle - under 8ms a
+ * slice, inside one frame - and hand its result to `done`. The same steps in
+ * the same order as genRun, so the answer is identical to the last digit.
+ */
+function idleRun(g, done) {
+  const later = (typeof requestIdleCallback === 'function')
+    ? function (f) { requestIdleCallback(f, { timeout: 1000 }); }
+    : function (f) { setTimeout(f, 16); };
+  const step = function (dl) {
+    const t0 = Date.now();
+    const budget = Math.min(8, (dl && dl.timeRemaining) ? Math.max(2, dl.timeRemaining()) : 8);
+    let x;
+    try { do { x = g.next(); } while (!x.done && Date.now() - t0 < budget); }
+    catch (e) { return; }
+    if (x.done) { try { done(x.value); } catch (e) { } } else later(step);
+  };
+  later(step);
+}
+/**
+ * The Human models' fits, built in the background.
+ *
+ * Fitting is a few hundred passes over the history - a third of a second on a
+ * phone, all at once. Done here it is a few milliseconds at a time while
+ * nothing else is happening, and the next board finds it ready. If a board
+ * asks first, surfModel() fits it there and then exactly as it always did, and
+ * this one, finishing later, does not overwrite the newer fit.
+ */
+function surfModelSoon() {
+  const races = surfRaces();
+  if (races.length < SURF_MIN_RACES) return;
+  if (_surfFit && races.length - _surfFit.n < SURF_REFIT_EVERY) return;
+  if (window.__surfJob) return;
+  window.__surfJob = true;
+  idleRun(surfTrainGen(races, _surfFit ? _surfFit.W : null), function (W) {
+    window.__surfJob = false;
+    if (_surfFit && _surfFit.n >= races.length) return;
+    _surfFit = { n: races.length, W: W, pairs: surfPairs(races) };
+  });
+}
+function surfWidthModelSoon() {
+  const races = surfWidthRaces();
+  if (races.length < SURF_MIN_RACES) return;
+  if (_surfWFit && races.length - _surfWFit.n < SURF_REFIT_EVERY) return;
+  if (window.__surfWJob) return;
+  window.__surfWJob = true;
+  idleRun(surfWidthTrainGen(races, _surfWFit ? _surfWFit.W : null), function (W) {
+    window.__surfWJob = false;
+    if (_surfWFit && _surfWFit.n >= races.length) return;
+    _surfWFit = { n: races.length, W: W, pairs: surfPairs(races), shares: slotShareMeans(races) };
+  });
+}
 function surfRefitSoon() {
   _surfWFit = null;
   if (window.__surfPending) return;
   window.__surfPending = true;
   const go = function () {
     window.__surfPending = false;
-    try { surfModel(); } catch (e) { }
+    // both fits, a slice at a time - and the width model too: clearing it above
+    // and leaving it for the next board to rebuild put its whole fit on that board
+    try { surfModelSoon(); } catch (e) { }
+    try { surfWidthModelSoon(); } catch (e) { }
   };
   if (window.requestIdleCallback) requestIdleCallback(go, { timeout: 4000 });
   else setTimeout(go, 1200);
@@ -8559,7 +8713,8 @@ function modelRecordsHTML() {
   const NAME = { PAYOUT: 'Payout', UPGRADED: 'Upgraded', ROAD: 'Road', BLENDV2: 'Blend 20/31',
                  BLENDV1: 'Blend 27/30', POSNUM: 'Numbers', HUMAN: 'Human',
                  HUMAN1: 'Human Roads', HUMAN2: 'Human Odds', HUMAN3: 'Human Roads %',
-                 RISK: 'Risk', ROADEXP: 'Road Expert',
+                 RISK: 'Risk', ROADEXP: 'Road Expert', PATCH: 'Road Patch', BRAIN: 'Human Brain',
+                 CONSENSUSROAD: 'Consensus Roads', CONSENSUSALL: 'Consensus All', CONSENSUSALL1: 'Consensus All-1',
                  CONSENSUS: 'Consensus', CONSENSUS6: 'Consensus 6',
                  CONSENSUSRISKALL: 'Consensus Risk All', CONSENSUSRISK9: 'Consensus Risk 9-1' };
   let h = '<div style="display:flex;font-size:9px;color:var(--text3);font-weight:800;padding:0 2px 5px">'+
@@ -8824,7 +8979,8 @@ const RISK_MIN_RACES=40;   // and not until there is some history behind it
 
 /** Averaged probability per vehicle across the models that vote. */
 function riskProbs(vis,roadI,slotI){
-  const base=ENGINES.filter(e=>!NO_VOTE_KEYS.includes(e.key)&&e.key!=='RISK');
+  // the Human Brain votes, but Risk stays the model it was measured as
+  const base=ENGINES.filter(e=>!NO_VOTE_KEYS.includes(e.key)&&e.key!=='RISK'&&e.key!=='BRAIN');
   const acc=vis.map(()=>0); let used=0;
   base.forEach(e=>{
     let r; try{r=e.fn(vis.slice(),roadI,slotI);}catch(err){return;}
@@ -11533,6 +11689,7 @@ const ENGINES=[
   {key:'ROADEXP',name:'Road Expert 🛣️',fn:engROADEXPERT},
   {key:'RISK',name:'Risk 🎲',fn:engRISK},
   {key:'PATCH',name:'Road Patch 🧩',fn:engPATCH},
+  {key:'BRAIN',name:'🧠 Human Brain',fn:engBRAIN},
 ];
 /* EDGE WAS HERE.
    Removed on request, and the reason is worth keeping: priced at the odds the
@@ -11593,10 +11750,10 @@ const NO_VOTE_KEYS=['POSNUM','HUMAN','HUMAN1','HUMAN2','HUMAN3','ROADEXP','RISK'
  */
 const VOTE_SETS = {
   CONSENSUS:     null,                                       // the original: the visible voters
-  CONSENSUS6:    ['PAYOUT','UPGRADED','ROAD','BLENDV1','BLENDV2','POSNUM'],
-  CONSENSUSROAD: ['ROAD','HUMAN','HUMAN1','HUMAN3'],         // everything that reads the surfaces
-  CONSENSUSALL:  ['PAYOUT','ROAD','BLENDV2','BLENDV1','UPGRADED','POSNUM','HUMAN','HUMAN1','HUMAN2','HUMAN3'],
-  CONSENSUSALL1: ['PAYOUT','ROAD','BLENDV2','BLENDV1','UPGRADED','HUMAN','HUMAN1','HUMAN2','HUMAN3'],
+  CONSENSUS6:    ['PAYOUT','UPGRADED','ROAD','BLENDV1','BLENDV2','POSNUM','BRAIN'],
+  CONSENSUSROAD: ['ROAD','HUMAN','HUMAN1','HUMAN3','BRAIN'],         // everything that reads the surfaces
+  CONSENSUSALL:  ['PAYOUT','ROAD','BLENDV2','BLENDV1','UPGRADED','POSNUM','HUMAN','HUMAN1','HUMAN2','HUMAN3','BRAIN'],
+  CONSENSUSALL1: ['PAYOUT','ROAD','BLENDV2','BLENDV1','UPGRADED','HUMAN','HUMAN1','HUMAN2','HUMAN3','BRAIN'],
   // ── AND THE SAME TWO AGAIN, WITH RISK ALLOWED IN ──
   //
   // Risk cannot vote in the four above, on purpose: it is built from those
@@ -11610,8 +11767,8 @@ const VOTE_SETS = {
   // favourite on roughly three races in four, and one extra voice among ten or
   // eleven moves a two-points-for-first tally only when the rest are already
   // split. If they diverge, the divergence is the finding.
-  CONSENSUSRISKALL:['PAYOUT','ROAD','BLENDV2','BLENDV1','UPGRADED','POSNUM','HUMAN','HUMAN1','HUMAN2','HUMAN3','RISK'],
-  CONSENSUSRISK9: ['PAYOUT','ROAD','BLENDV2','BLENDV1','UPGRADED','HUMAN','HUMAN1','HUMAN2','HUMAN3','RISK']
+  CONSENSUSRISKALL:['PAYOUT','ROAD','BLENDV2','BLENDV1','UPGRADED','POSNUM','HUMAN','HUMAN1','HUMAN2','HUMAN3','BRAIN','RISK'],
+  CONSENSUSRISK9: ['PAYOUT','ROAD','BLENDV2','BLENDV1','UPGRADED','HUMAN','HUMAN1','HUMAN2','HUMAN3','BRAIN','RISK']
 };
 const CONSENSUS_NAMES = {
   CONSENSUS:'Consensus', CONSENSUS6:'Consensus 6',
@@ -11708,7 +11865,7 @@ function engineAccuracyRaw(cleanOnly){
     for(let idx=0;idx<done.length;idx++){
       const r=done[idx];
       // who got THIS race right?
-      const winners=ENGINES.filter(e=>!NO_VOTE_KEYS.includes(e.key)).filter(e=>{const ec=r.engineCalls[e.key];return ec&&(ec.vi===r.winner||ec.vi2===r.winner);}).map(e=>e.key);
+      const winners=ENGINES.filter(e=>!NO_VOTE_KEYS.includes(e.key)).filter(e=>{const ec=r.engineCalls[e.key];return ec&&!replayedCall(r,e.key)&&(ec.vi===r.winner||ec.vi2===r.winner);}).map(e=>e.key);
       // if no current model, or we need to pick: choose highest running-accuracy among last-race winners
       if(cur===null){
         // pick best by running accuracy among those that won this race (or any if none)
@@ -11893,7 +12050,7 @@ const CONSENSUS_ROWS=['CONSENSUS','CONSENSUS6'].concat(
  */
 function orderedModelKeys(){
   const pref=['PAYOUT','UPGRADED','CONSENSUS','CONSENSUS6','CONSENSUSROAD','CONSENSUSALL',
-              'CONSENSUSALL1','CONSENSUSRISKALL','CONSENSUSRISK9','ROADEXP','RISK','HUMAN',
+              'CONSENSUSALL1','CONSENSUSRISKALL','CONSENSUSRISK9','ROADEXP','RISK','HUMAN','BRAIN',
               'ROAD','BLENDV2','BLENDV1','POSNUM'];
   const all=ENGINES.map(e=>e.key).concat(CONSENSUS_ROWS);
   const out=[],seen={};
@@ -11969,7 +12126,7 @@ function adaptiveCurrentKey(){
   ENGINES.forEach(e=>{runCorrect[e.key]=0;runTotal[e.key]=0;});
   for(let idx=0;idx<done.length;idx++){
     const r=done[idx];
-    const winners=ENGINES.filter(e=>!NO_VOTE_KEYS.includes(e.key)).filter(e=>{const ec=r.engineCalls[e.key];return ec&&(ec.vi===r.winner||ec.vi2===r.winner);}).map(e=>e.key);
+    const winners=ENGINES.filter(e=>!NO_VOTE_KEYS.includes(e.key)).filter(e=>{const ec=r.engineCalls[e.key];return ec&&!replayedCall(r,e.key)&&(ec.vi===r.winner||ec.vi2===r.winner);}).map(e=>e.key);
     // the same rule as the accuracy table: never choose using this race's answer
     if(cur===null){const pool=ENGINES.filter(e=>!NO_VOTE_KEYS.includes(e.key)).map(e=>e.key);cur=pool.slice().sort((a,b)=>{const pa=runTotal[a]?runCorrect[a]/runTotal[a]:0,pb=runTotal[b]?runCorrect[b]/runTotal[b]:0;return pb-pa;})[0];}
     // Same guard as the accuracy table: a race the followed model never called
@@ -12340,7 +12497,7 @@ function partialPredHTML(){
     CONSENSUS6:'Consensus 6',
     CONSENSUSROAD:'Consensus Roads',CONSENSUSALL:'Consensus All',CONSENSUSALL1:'Consensus All-1',
     CONSENSUSRISKALL:'Consensus Risk All',CONSENSUSRISK9:'Consensus Risk 9-1',
-    RISK:'Risk'};
+    RISK:'Risk',BRAIN:'Human Brain'};
 
   const accBy={};
   try{engineAccuracy().forEach(a=>accBy[a.key]=a);}catch(e){}
@@ -12548,7 +12705,7 @@ function showPredBox(){
   const cv1=consensusPicks.vi1!=null?ALL_VEHICLES[consensusPicks.vi1]:null;
   const cv2=consensusPicks.vi2!=null?ALL_VEHICLES[consensusPicks.vi2]:null;
   // how many of the 5 voting models put the consensus #1 as their top pick
-  const agreeCount=voteEngs.filter(e=>e.vi===consensusPicks.vi1).length;
+  const agreeCount=voteEngs.filter(e=>!AGREE_SKIP_KEYS.includes(e.key)&&e.vi===consensusPicks.vi1).length;
 
   // ── BEST-BET FILTER: rate the strength of this race ──
   // strong = models agree + top pick clearly ahead; weak = split/coin-flip
@@ -12623,7 +12780,7 @@ function showPredBox(){
     CONSENSUS6:'Consensus 6',
     CONSENSUSROAD:'Consensus Roads',CONSENSUSALL:'Consensus All',CONSENSUSALL1:'Consensus All-1',
     CONSENSUSRISKALL:'Consensus Risk All',CONSENSUSRISK9:'Consensus Risk 9-1',
-    RISK:'Risk'};
+    RISK:'Risk',BRAIN:'Human Brain'};
   // build a lookup for each model's picks
   const pickOf={};
   engs.forEach(e=>{pickOf[e.key]={vi:e.vi,vi2:e.vi2,pct:e.pct,pct2:e.pct2};});
@@ -12715,6 +12872,7 @@ function showPredBox(){
         <button class="speaker-btn" style="width:23px;height:23px;font-size:11px;flex-shrink:0" onclick="speakModel(${pk.vi},${pk.vi2})">🔊</button>
       </div>
       ${key==='HUMAN'?(function(){try{return humanRoadsHTML();}catch(e){return '';}})():''}
+      ${key==='BRAIN'?(function(){try{return brainWhyHTML();}catch(e){return '';}})():''}
     </div>`;
   }).join('');
 
@@ -13040,7 +13198,7 @@ function renderMemoKey(){
     return (typeof sel3!=='undefined'&&sel3?sel3.join(','):'')+'|'+
            (typeof selRoad!=='undefined'?selRoad:'')+'|'+
            (typeof selSlot!=='undefined'?selSlot:'')+'|'+
-           ((state.results||[]).length)+'|'+(state.accResetT||0)+'|'+
+           ((state.results||[]).length)+'|'+(state.accResetT||0)+'|'+(window.rxCallsGen||0)+'|'+
            (state.instantAI?1:0)+(state.simpleMode?1:0)+(state.ownModel?1:0)+'|'+
            (state.guardModel||'')+'|'+
            (t.on?1:0)+':'+t.pairMin+':'+t.confMin+':'+t.shareMin+'|'+
@@ -13054,6 +13212,41 @@ function renderMemoKey(){
            (function(){ const b=state.beepOn||{};
              return ALERT_KEYS.map(function(k){return b[k]?1:0;}).join(''); })();
   }catch(e){ return null; }
+}
+/**
+ * ── ANSWERS ABOUT THE PAST SURVIVE A PRICE MOVING ──
+ *
+ * The render memo is dropped on every price reading, because some of what it
+ * holds reads the live market. A good part of it does not: how a model has done
+ * in each agreement band, Guard's training rows. Those are a pass over the whole
+ * history, and with the market read several times a second they were being
+ * rebuilt several times a second - a third of a second each on a phone, which is
+ * the stutter in the closing seconds.
+ *
+ * So history-only answers live here instead, keyed on the history itself - its
+ * length, a checksum of every race's winner, the newest race, the reset point,
+ * the AI mode, and a counter the backfills bump - so logging, resolving or
+ * editing a race, or a backfill filling calls in, all force a fresh answer. A
+ * price moving does not, and neither does a new board.
+ */
+let _histCache={key:null,v:{}};
+function historyKeyNow(){
+  const R=state.results||[]; let w=0;
+  for(let i=0;i<R.length;i++){ const x=R[i]&&R[i].winner; if(x!=null)w=(w+(x+1)*((i&1023)+1))|0; }
+  const last=R[R.length-1]||{};
+  // NOT the board: these answers are about the past, and keying them on the
+  // board on screen threw them away on every fill - the moment it matters most
+  let mode='';
+  try{ mode=(instantOn()?1:0)+''+(state.simpleMode?1:0)+(state.ownModel?1:0); }catch(e){}
+  return R.length+':'+w+':'+(last.t||0)+':'+(window.rxCallsGen||0)+':'+(state.accResetT||0)+':'+mode;
+}
+function historyMemo(name,fn){
+  let key=null;
+  try{ key=historyKeyNow(); }catch(e){}
+  if(key==null)return fn();
+  if(_histCache.key!==key)_histCache={key:key,v:{}};
+  if(!Object.prototype.hasOwnProperty.call(_histCache.v,name))_histCache.v[name]=fn();
+  return _histCache.v[name];
 }
 function renderMemo(name,fn){
   let key=null;
@@ -14918,7 +15111,7 @@ function openOutcomeModal(){
       // Six real voters. Numbers votes HERE only - the main Consensus above
       // still runs on five without it, so these two are no longer the same
       // tally with two names.
-      const C6_KEYS_BASE=['PAYOUT','UPGRADED','ROAD','BLENDV1','BLENDV2','POSNUM'];
+      const C6_KEYS_BASE=VOTE_SETS.CONSENSUS6;
       const C6_KEYS=C6_KEYS_BASE.filter(k=>!isHiddenInSimple(k));
       const eps6=epsAll.filter(e=>C6_KEYS.includes(e.key));   // epsAll, so Numbers is available
       const votes6={};eps6.forEach(e=>{if(e.vi!=null)votes6[e.vi]=(votes6[e.vi]||0)+2;if(e.vi2!=null)votes6[e.vi2]=(votes6[e.vi2]||0)+1;});
@@ -14933,7 +15126,7 @@ function openOutcomeModal(){
       });
       // its own bet strength: how many of the 6 agree on the top pick
       try{
-        const agree6=eps6.filter(e=>e.vi===(rk6[0]?rk6[0].v:null)).length;
+        const agree6=eps6.filter(e=>!AGREE_SKIP_KEYS.includes(e.key)&&e.vi===(rk6[0]?rk6[0].v:null)).length;
         const pp6=makePrediction(sel3,selRoad,selSlot);
         // 6 voters: 4+ agree = Strong, 3 = Decent, fewer = Weak
         var _betStr6 = agree6>=4?'S' : agree6>=3?'D' : 'W';
@@ -14949,7 +15142,7 @@ function openOutcomeModal(){
         // as "STRONG BET" was filed as Decent, and the Strong/Decent rows in the
         // Results tab were measuring buckets the user was never shown. The
         // displayed grade is already kept for the Safe-mode voice; use it.
-        const agree=eps.filter(e=>e.vi===(rk[0]?rk[0].v:null)).length;
+        const agree=eps.filter(e=>!AGREE_SKIP_KEYS.includes(e.key)&&e.vi===(rk[0]?rk[0].v:null)).length;
         var _betStr=(typeof _lastBetStr!=='undefined'&&_lastBetStr)
           ? _lastBetStr
           : betStrength(agree,(currentPred&&currentPred.conf1)||0,currentPred&&currentPred.tooClose);
@@ -16824,11 +17017,21 @@ try{
                          // loud, because this one answers a question that was
                          // actually asked: where is Road Patch's record
                          try{patchBackfill(false);}catch(e){}
+                         // after consensusBackfill: no Consensus row is filled from a replayed vote
+                         try{brainBackfill(false);}catch(e){}
                          // and Edge, which arrived after every race here was
                          // logged and would otherwise sit with no record at all
                          try{edgeBackfill(false);}catch(e){}};
   if(window.requestIdleCallback)requestIdleCallback(runBackfill,{timeout:4000});
   else setTimeout(runBackfill,1500);
+  // The Human models fit themselves the first time they are asked, which used to
+  // be the first board after opening the app - a long pause on exactly the
+  // screen being watched. Fitted in the quiet after start-up instead, one at a
+  // time, so that board draws at once.
+  const warm=function(f){ if(window.requestIdleCallback)requestIdleCallback(f,{timeout:8000}); else setTimeout(f,2500); };
+  warm(function(){ try{surfModelSoon();}catch(e){} warm(function(){ try{surfWidthModelSoon();}catch(e){}
+    // and Guard's history, one band at a time, so the first board finds it ready
+    warm(function(){ try{guardRaces();}catch(e){} warm(function(){ try{modelBandTables();}catch(e){} }); }); }); });
 }catch(e){}
 try{loadMusicLibrary();}catch(e){}
 try{if(ytKey()&&(location.protocol==='https:'||location.protocol==='http:'))ytLoadApi();}catch(e){}
@@ -16903,7 +17106,7 @@ function G(){
   state.guard=g;
   return g;
 }
-function guardVoteKeys(){return ENGINES.filter(e=>!NO_VOTE_KEYS.includes(e.key)&&!isHiddenInSimple(e.key)).map(e=>e.key);}
+function guardVoteKeys(){return ENGINES.filter(e=>!NO_VOTE_KEYS.includes(e.key)&&!AGREE_SKIP_KEYS.includes(e.key)&&!isHiddenInSimple(e.key)).map(e=>e.key);}
 
 // ══════════════════════════════════════════════════════════════════════
 // HOW STRONG IS THE ROAD ON THE BOARD?
@@ -17130,6 +17333,7 @@ function agreeShareOf(r){
   if(top==null)return null;
   let k=0,n=0;
   for(const key in r.engineCalls){
+    if(AGREE_SKIP_KEYS.indexOf(key)>=0)continue;
     const c=r.engineCalls[key];
     if(!c||typeof c!=='object'||c.vi==null)continue;
     n++; if(c.vi===top)k++;
@@ -17156,7 +17360,7 @@ function agreeShareNow(key){
     }
     if(top==null)return null;
     const eps=allEnginePredictions(sel3,selRoad,selSlot)
-      .filter(e=>e&&e.vi!=null&&!isHiddenInSimple(e.key));
+      .filter(e=>e&&e.vi!=null&&!AGREE_SKIP_KEYS.includes(e.key)&&!isHiddenInSimple(e.key));
     if(!eps.length)return null;
     const k=eps.filter(e=>e.vi===top).length;
     return {k:k,n:eps.length,share:k/eps.length,vi:top};
@@ -17267,7 +17471,7 @@ function guardFeat(r){
          board:bp?bp.sum:null,share:sh,
          hit:(c.vi===r.winner||c.vi2===r.winner)};
 }
-function guardRaces(){ return renderMemo('guardRaces',guardRacesRaw); }
+function guardRaces(){ return historyMemo('guardRaces',guardRacesRaw); }
 function guardRacesRaw(){
   const cutoff=state.accResetT||0;
   return state.results
@@ -17491,13 +17695,14 @@ function guardLiveFeat(){
   eps.forEach(e=>{if(e.vi!=null)votes[e.vi]=(votes[e.vi]||0)+2;if(e.vi2!=null)votes[e.vi2]=(votes[e.vi2]||0)+1;});
   const rk=Object.entries(votes).map(([v,n])=>({v:+v,n:n})).sort((a,b)=>b.n-a.n);
   const c={vi:rk[0]?rk[0].v:null,vi2:rk[1]?rk[1].v:null};
-  let pair=0;
-  eps.forEach(e=>{if((e.vi===c.vi&&e.vi2===c.vi2)||(e.vi===c.vi2&&e.vi2===c.vi))pair++;});
+  let pair=0,n=0;
+  eps.forEach(e=>{if(AGREE_SKIP_KEYS.includes(e.key))return;n++;
+    if((e.vi===c.vi&&e.vi2===c.vi2)||(e.vi===c.vi2&&e.vi2===c.vi))pair++;});
   let p={conf1:0};
   try{p=makePrediction(sel3,selRoad,selSlot);}catch(e){}
   const bp=boardPrice(sel3);
   let sh=null; try{ const q=agreeShareNow(); sh=q?q.share:null; }catch(e){}
-  return{pair:pair,n:eps.length,conf:p.conf1||0,road:selRoad,
+  return{pair:pair,n:n,conf:p.conf1||0,road:selRoad,
          board:bp?bp.sum:null,share:sh,c:c};
 }
 function guardVerdictNow(){ return renderMemo('guard',guardVerdictNowRaw); }
@@ -17708,21 +17913,49 @@ const MG_NAMES=['the field is united','most of the field agrees','the field is s
 
 /** This person's own record, at this agreement band, for this model. */
 function modelBandRecord(key,band){
-  const cutoff=state.accResetT||0;
-  let n=0,w=0, an=0,aw=0;
-  (state.results||[]).forEach(r=>{
-    if(!r||r.winner==null||!aiScoredRace(r)||(r.t||0)<cutoff||!inCurrentMode(r))return;
-    const calls=r.engineCalls||{};
-    for(const k in calls){
-      const c=calls[k];
-      if(!c||typeof c!=='object'||c.vi==null)continue;
-      const q=agreeShareOf({predVi1:c.vi,engineCalls:calls});
-      if(!q||agreeBandOf(q.share)!==band)continue;
-      const hit=(c.vi===r.winner);
-      an++; if(hit)aw++;                       // every model, for the fallback
-      if(k===key){ n++; if(hit)w++; }
-    }
+  return historyMemo('band:'+key+':'+band,function(){ return modelBandRecordRaw(key,band); });
+}
+/**
+ * Every model's record in one agreement band, in one pass over the history.
+ *
+ * This used to be one pass per model asked about, each recomputing the field's
+ * agreement for every call on every race. The table holds each model's own
+ * count, the pooled count of every live call, and each model's replayed calls
+ * apart, so any model's answer below is a lookup.
+ */
+function modelBandTable(band){ return modelBandTables()[band]||{own:{},rep:{},an:0,aw:0}; }
+function modelBandTables(){
+  return historyMemo('bandTables',function(){
+    const cutoff=state.accResetT||0;
+    const T=[0,1,2].map(function(){ return {own:{},rep:{},an:0,aw:0}; });
+    (state.results||[]).forEach(r=>{
+      if(!r||r.winner==null||!aiScoredRace(r)||(r.t||0)<cutoff||!inCurrentMode(r))return;
+      const calls=r.engineCalls||{};
+      // the field's agreement depends only on which vehicle a call puts first,
+      // and a board has three: worked out once per vehicle, not once per call
+      const bandOf={};
+      for(const k in calls){
+        const c=calls[k];
+        if(!c||typeof c!=='object'||c.vi==null)continue;
+        if(!(c.vi in bandOf)){
+          const q=agreeShareOf({predVi1:c.vi,engineCalls:calls});
+          bandOf[c.vi]=q?agreeBandOf(q.share):-1;
+        }
+        const t=T[bandOf[c.vi]];
+        if(!t)continue;
+        const hit=(c.vi===r.winner)?1:0;
+        const o=t.own[k]||(t.own[k]={n:0,w:0}); o.n++; o.w+=hit;
+        // a replayed call is in its own model's pool and nobody else's
+        if(replayedCall(r,k)){ const x=t.rep[k]||(t.rep[k]={n:0,w:0}); x.n++; x.w+=hit; }
+        else { t.an++; t.aw+=hit; }
+      }
+    });
+    return T;
   });
+}
+function modelBandRecordRaw(key,band){
+  const t=modelBandTable(band), o=t.own[key]||{n:0,w:0}, x=t.rep[key]||{n:0,w:0};
+  const n=o.n, w=o.w, an=t.an+x.n, aw=t.aw+x.w;
   if(n>=MG_MIN)return {pct:w/n,n:n,own:true};
   if(an>=MG_MIN)return {pct:aw/an,n:an,own:false};
   return null;
@@ -18145,6 +18378,7 @@ function mgDots(h){
 }
 function modelGuardTableHTML(){
   try{ patchBackfill(true); }catch(e){}
+  try{ brainBackfill(true); }catch(e){}
   try{ edgeBackfill(true); }catch(e){}
   // Edge's strictness dial used to sit here. The page that replaced it asks
   // the question that turned out to matter - not how sure a model is, but
@@ -20977,10 +21211,10 @@ init();
 /* RXA_BUNDLE_CORE_START -- shared by the Android page and Node accuracy tests. */
 (function(root){
   'use strict';
-  const VERSION='RXA-BUNDLE-20260912-v2';
-  const VERSIONS=['RXA-BUNDLE-20260911-v1',VERSION];
+  const VERSION='RXA-BUNDLE-20261016-v3';
+  const VERSIONS=['RXA-BUNDLE-20260911-v1','RXA-BUNDLE-20260912-v2',VERSION];
   const KEYS=['BAYESENSEMBLE','STREAKGUARD'];
-  const BASE=['PAYOUT','ROAD','BLENDV1','BLENDV2','UPGRADED','HUMAN','HUMAN1','HUMAN2','HUMAN3','PATCH'];
+  const BASE=['PAYOUT','ROAD','BLENDV1','BLENDV2','UPGRADED','HUMAN','HUMAN1','HUMAN2','HUMAN3','PATCH','BRAIN'];
   const defaults={halfLife:200,priorStrength:12,minHistory:30,pairGate:.80,lossRaise:.03,lockAfter:3,resumeWins:2,raiseRaces:5,calibrationSupport:40};
   const clone=x=>JSON.parse(JSON.stringify(x));
   const finite=x=>typeof x==='number'&&Number.isFinite(x);
@@ -21273,7 +21507,8 @@ init();
     if(sel3.length!==3||selRoad==null||selSlot==null)return null;
     const q=key?predictByKey(key,sel3,selRoad,selSlot):null,v=key?(q&&q.vi):(voicePicks()||{}).vi1;
     if(v==null)return null;
-    const eps=allEnginePredictions(sel3,selRoad,selSlot).filter(e=>e&&e.vi!=null&&!C.KEYS.includes(e.key)&&!isHiddenInSimple(e.key));
+    const skip=C.KEYS.concat(typeof AGREE_SKIP_KEYS!=='undefined'?AGREE_SKIP_KEYS:[]);
+    const eps=allEnginePredictions(sel3,selRoad,selSlot).filter(e=>e&&e.vi!=null&&!skip.includes(e.key)&&!isHiddenInSimple(e.key));
     if(!eps.length)return null;const k=eps.filter(e=>e.vi===v).length;return {k,n:eps.length,share:k/eps.length,vi:v};
   };
   const oldSelf=selfGuardNowRaw;
@@ -21354,7 +21589,7 @@ init();
       const v=f.apply(this,arguments);let touched=false;
       for(const r of state.results||[])for(const k of Object.keys(r.engineCalls||{}))if(before.has(r)&&!before.get(r).has(k)){
         r.replayOrigins=r.replayOrigins||{};r.replayOrigins[k]={version:C.VERSION,origin:'replay',historicalInputsVerified:false};touched=true;}
-      if(touched)save();return v;};
+      if(touched){cache=null;lastTest=null;window.rxCallsGen=(window.rxCallsGen||0)+1;save();}return v;};
   });
   // A recorded confidence adjustment is formed from the prefix only.
   window.guardRacesRaw=function(){
@@ -21704,7 +21939,7 @@ test('Timed lock is taken before the result and survives a changed model selecti
 });
 test('Live agreement does not gain votes from the new descendant models',()=>{
   const x=fixture(),q=vm.runInContext("agreeShareNow('CONSENSUS')",x);
-  assert.strictEqual(q.n,10);
+  assert.strictEqual(q.n,vm.runInContext('RXABundleCore.BASE.length',x));
 });
 test('Once the call locks, the voice and the price panel follow the locked pair the race is recorded on',()=>{
   const x=fixture();
@@ -22257,7 +22492,8 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
       return R.length + '|' + (last.t || 0) + '|' + (last.winner == null ? '-' : last.winner)
            + '|' + (last.liveOdds ? 1 : 0) + (last.closeOdds ? 1 : 0)
            + '|' + ((state && state.accResetT) || 0)
-           + '|' + (typeof instantOn === 'function' ? (instantOn() ? 1 : 0) : 0);
+           + '|' + (typeof instantOn === 'function' ? (instantOn() ? 1 : 0) : 0)
+           + '|' + (window.rxCallsGen || 0);
     }
 
     /* One pass: the races that count, and their prices, parsed once each.
@@ -23369,7 +23605,8 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
       return R.length + '|' + (last.t || 0) + '|' + (last.winner == null ? '-' : last.winner)
            + '|' + (last.liveOdds ? 1 : 0) + (last.closeOdds ? 1 : 0)
            + '|' + ((state && state.accResetT) || 0)
-           + '|' + (typeof instantOn === 'function' ? (instantOn() ? 1 : 0) : 0);
+           + '|' + (typeof instantOn === 'function' ? (instantOn() ? 1 : 0) : 0)
+           + '|' + (window.rxCallsGen || 0);
     }
     /* ── APPENDED CHEAPLY, AND REBUILT AFTER THE FRAME, NOT DURING IT ─────
        Two things, both about not blocking a redraw.
@@ -23735,7 +23972,7 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
       }).join('');
 
       /* per-model record on this exact trio (any road), two-pick */
-      var MODELS = [['CONSENSUS','Consensus'],['PATCH','Road Patch'],['ROAD','Road'],
+      var MODELS = [['CONSENSUS','Consensus'],['BRAIN','Human Brain'],['PATCH','Road Patch'],['ROAD','Road'],
                     ['UPGRADED','Upgraded'],['PAYOUT','Payout'],['HUMAN','Human'],['FAV','Board price']];
       var recs = MODELS.map(function(m){
         var hit = 0, tot = 0;
@@ -23787,7 +24024,8 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
       var R = (state && state.results) || [];
       var last = R[R.length - 1] || {};
       return (sel3 || []).join(',') + '|' + (typeof selRoad !== 'undefined' ? selRoad : '')
-           + '|' + R.length + '|' + (last.t || 0) + '|' + (last.winner == null ? '-' : last.winner);
+           + '|' + R.length + '|' + (last.t || 0) + '|' + (last.winner == null ? '-' : last.winner)
+           + '|' + (window.rxCallsGen || 0);
     }
     function paint(){
       try {
@@ -24341,7 +24579,7 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
     vm.runInContext(core,e);vm.runInContext(adapter,e);return e;
   }
   test('New experiment is linked from the app without adding a consensus vote',()=>{
-    const e=fixture();assert.strictEqual(vm.runInContext('ENGINES.length',e),12);e.RXARoadLab.open();assert(e.screenHTML.includes('Road Evidence Lab')||e.screenHTML.includes('ROAD EVIDENCE LAB'));
+    const e=fixture();assert.strictEqual(vm.runInContext('ENGINES.length',e),vm.runInContext('RXABundleCore.BASE.length+RXABundleCore.KEYS.length',e));e.RXARoadLab.open();assert(e.screenHTML.includes('Road Evidence Lab')||e.screenHTML.includes('ROAD EVIDENCE LAB'));
     assert(e.screenHTML.includes('hypotheses'));assert(e.screenHTML.includes('21'));
   });
   test('Timed hypothesis is immutable while later timeline bands are recorded',()=>{
@@ -24603,6 +24841,30 @@ test('A race is settled on the price it closed at, and a late drop under the flo
   assert.strictEqual(h.n,2,'the race that closed at 1.6 is not counted');
   assert.strictEqual(rows.seen.closing,2,'and the page says how many priced races carry a close');
   assert.strictEqual(rows.seen.counted,3);
+});
+
+test('The Human Brain backs the ignored vehicle only when the roads it remembers suit it',()=>{
+  const env={console,Math,JSON,Object,Array,Date,state:{results:[]}};vm.createContext(env);
+  const lines=html.split('\n');
+  const a=lines.findIndex(l=>/^const ALL_VEHICLES=\[/.test(l));let b=a;while(!/^const SPEEDS=\{/.test(lines[b]))b++;let c=b;while(!/^};/.test(lines[c]))c++;
+  vm.runInContext(lines.slice(a,c+1).join('\n').replace(/^const /gm,'var '),env);
+  for(const f of ['getRank','slotShares'])vm.runInContext(fnSrc(f),env);
+  vm.runInContext(html.match(/\/\* RXA_BRAIN_START[\s\S]*?\/\* RXA_BRAIN_END \*\//)[0],env);
+  const V=n=>env.ALL_VEHICLES.findIndex(v=>v.name===n), R=n=>env.ROADS.findIndex(r=>r.name===n);
+  const board=[V('Supercar'),V('Stock Car'),V('ATV')];
+  const past=(road,n)=>Array.from({length:n},(_,i)=>({t:i,road:R(road),slot:0,vehicles:[0,1,2],winner:0,hiddenRoads:[R(road),R(road)],
+    roadPct:[33,33,34],roadRun:[0,1,2]}));
+  const fast=env.engBRAIN(board,R('Potholes'),0,past('Expressway',12));
+  const slow=env.engBRAIN(board,R('Potholes'),0,past('Bumpy',12));
+  assert([fast.vi,fast.vi2].includes(V('Supercar')),'Potholes on show after a run of Expressway: the Supercar is in');
+  assert(![slow.vi,slow.vi2].includes(V('Supercar')),'after a run of Bumpy it is not');
+  assert(env.brainIsRisky(V('Supercar'),R('Potholes'))&&!env.brainIsRisky(V('Supercar'),R('Highway')),'and it is labelled a risk pick only on its bad roads');
+  // it reads nothing but the races it is handed: the race being predicted carries no answer in
+  const t=env.brainThink(board,R('Potholes'),0,past('Expressway',12));
+  assert(Math.abs(t.p.reduce((x,y)=>x+y,0)-1)<1e-9,'the three chances add up to one');
+  assert.strictEqual(fast.pct+fast.pct2+fast.pct3>=99,true);
+  const more=past('Expressway',12).concat([{t:99,road:R('Bumpy'),slot:1,vehicles:[3,4,5],winner:3,hiddenRoads:[R('Bumpy'),R('Bumpy')],roadPct:[33,33,34],roadRun:[0,1,2]}]);
+  assert.notDeepStrictEqual(env.brainThink(board,R('Potholes'),0,more).roads,t.roads,'and a race added to its history changes what it remembers');
 });
 
 console.log('Verified '+tests+' live-market checks.');

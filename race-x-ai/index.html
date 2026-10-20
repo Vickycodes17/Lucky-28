@@ -3168,7 +3168,7 @@ function menuGo(what){
       '<p>Two different <b>mixes of payout and road</b> weighting. The numbers are the ratio each uses. Having both lets you see which balance suits the game better over time.</p>'+
 
       '<h4>&#129504; SAFE BET</h4>'+
-      '<p>Not a model, a rule for <b>when to bet at all</b>. Of the three pairs on the board it keeps those where <b>both</b> vehicles pay at least <b>1.7x</b>, takes the one the Human Brain is surest of, and says <b>PLAY</b> only when the Brain gives that pair <b>95% or more</b>. Every other race is a <b>SKIP</b>.</p>'+
+      '<p>Not a model, a rule for <b>when to bet at all</b>. Of the three pairs on the board it keeps those where <b>both</b> vehicles pay at least <b>1.7x</b>, takes the one the Human Brain is surest of, and says <b>PLAY</b> only when the Brain gives that pair <b>95% or more</b> &mdash; <b>98%</b> straight after two losses in a row. Every other race is a <b>SKIP</b>.</p>'+
       '<p>It plays about one race in eight. On the five backups (2,303 races) it won 91.8% of its plays, never lost more than two in a row, and returned +5.5% on the closing prices. Three losses in a row can still happen &mdash; at that hit rate about once in two thousand bets &mdash; and its record on the home screen and the Value page shows every play, judged on the price the race closed at.</p>'+
 
       '<h4>READING THE ROW</h4>'+
@@ -24596,10 +24596,18 @@ console.log('Verified '+tests+' integration invariants in an isolated DOM/Androi
    ══════════════════════════════════════════════════════════════════════ */
 const SAFE_FLOOR=1.7;      // both vehicles must pay at least this
 const SAFE_PAIR=0.95;      // and the Brain must give the pair at least this
+// AND AFTER TWO LOSSES IN A ROW, A THIRD BET HAS TO BE NEARLY CERTAIN. Losses
+// do not cluster in the history - a loss does not make the next one likelier -
+// so this does not predict anything; it only makes the one bet that could turn
+// two losses into three a stricter one. A deep search over five families of
+// rules, each checked race by race on sessions it was not tuned on, kept the
+// 95% rule and added only this.
+const SAFE_GUARD=0.98, SAFE_GUARD_AFTER=2;
 const SAFE_PAIRS=[[0,1],[0,2],[1,2]];
 function safePrice(x){ const n=parseFloat(String(x).split('/')[0]); return (isFinite(n)&&n>0&&n<50)?n:null; }
 /** The verdict for three chances and three prices, both in the board's order. */
-function safeVerdict(p,prices){
+function safeVerdict(p,prices,need){
+  need=need||SAFE_PAIR;
   if(!p||p.length!==3||!prices||prices.length!==3)return {play:false,why:'wait'};
   let best=null, any=false;
   for(const [a,b] of SAFE_PAIRS){
@@ -24612,17 +24620,18 @@ function safeVerdict(p,prices){
   }
   if(!any)return {play:false,why:'wait'};
   if(!best)return {play:false,why:'floor'};
-  best.play=best.q>=SAFE_PAIR; best.why=best.play?'play':'short';
+  best.need=need; best.play=best.q>=need; best.why=best.play?'play':'short';
   // the stronger of the two first
   if(p[best.b]>p[best.a]){ const t=best.a; best.a=best.b; best.b=t; const u=best.pa; best.pa=best.pb; best.pb=u; }
   return best;
 }
 /** A logged race's verdict, on the prices it closed at (else the last reading). */
-function safeRaceVerdict(r){
+function safeNeed(run){ return (run>=SAFE_GUARD_AFTER)?SAFE_GUARD:SAFE_PAIR; }
+function safeRaceVerdict(r,need){
   if(!r||!r.brainP||!r.vehicles||r.vehicles.length!==3)return null;
   const odds=(r.closeOdds&&r.closeOdds.length===3)?r.closeOdds:r.liveOdds;
   if(!odds||odds.length!==3)return null;
-  return safeVerdict(r.brainP,odds.map(safePrice));
+  return safeVerdict(r.brainP,odds.map(safePrice),need);
 }
 /** The rule's own record: every race it would have played, in order. */
 function safeRecord(){
@@ -24631,7 +24640,7 @@ function safeRecord(){
     const R=(state.results||[]).filter(r=>r&&r.winner!=null&&(r.t||0)>=cutoff).slice().sort((a,b)=>(a.t||0)-(b.t||0));
     let n=0,w=0,w1=0,ret=0,run=0,worst=0,replay=0,seen=0;const last=[];
     for(const r of R){
-      const v=safeRaceVerdict(r);
+      const v=safeRaceVerdict(r,safeNeed(run));
       if(!v)continue;
       seen++;
       if(!v.play)continue;
@@ -24673,7 +24682,8 @@ function safeRecord(){
     const verdictNow=function(){
       if(!(sel3&&sel3.length===3&&selRoad!=null&&selSlot!=null))return null;
       const p=boardP(); if(!p)return null;
-      return safeVerdict(p,marketPrices());
+      let run=0; try{ run=safeRecord().run||0; }catch(e){}
+      return safeVerdict(p,marketPrices(),safeNeed(run));
     };
     const html=function(){
       const v=verdictNow();
@@ -24683,12 +24693,14 @@ function safeRecord(){
       if(v.why==='wait')line='<span style="color:var(--text3)">⏳ Waiting for the prices on this board.</span>';
       else if(v.why==='floor')line='<b style="color:var(--accent2)">⛔ SKIP</b> <span style="color:var(--text2)">no pair pays '+SAFE_FLOOR.toFixed(1)+'x on both vehicles.</span>';
       else if(!v.play)line='<b style="color:var(--accent2)">⛔ SKIP</b> <span style="color:var(--text2)">best pair paying '+SAFE_FLOOR.toFixed(1)+'x+ is '+
-        nm(v.a)+' + '+nm(v.b)+' at '+Math.round(v.q*100)+'% &mdash; needs '+Math.round(SAFE_PAIR*100)+'%.</span>';
+        nm(v.a)+' + '+nm(v.b)+' at '+(Math.floor(v.q*1000)/10).toFixed(1)+'% &mdash; needs '+Math.round(v.need*100)+'%'+
+        (v.need>SAFE_PAIR?' after two losses in a row':'')+'.</span>';
       else line='<b style="color:var(--green)">✅ PLAY</b> <span style="color:var(--text)"><b>'+nm(v.a)+' + '+nm(v.b)+'</b> &mdash; Brain '+
         Math.round(v.q*100)+'% · pays '+v.pa.toFixed(1)+' / '+v.pb.toFixed(1)+' (split '+(v.pa*v.pb/(v.pa+v.pb)).toFixed(2)+'x)</span>';
       return '<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">'+
           '<span style="font-size:10px;font-weight:900;color:var(--accent);letter-spacing:.4px">🧠 SAFE BET</span>'+
-          '<span style="font-size:8.5px;color:var(--text3)">'+Math.round(SAFE_PAIR*100)+'% · both &ge;'+SAFE_FLOOR.toFixed(1)+'x'+(closed?' · closed':'')+'</span>'+
+          '<span style="font-size:8.5px;color:var(--text3)">'+Math.round((v.need||SAFE_PAIR)*100)+'% · both &ge;'+SAFE_FLOOR.toFixed(1)+'x'+
+            ((v.need||SAFE_PAIR)>SAFE_PAIR?' · 2 losses in a row: stricter':'')+(closed?' · closed':'')+'</span>'+
           '<span onclick="event.stopPropagation();safeVoiceToggle()" style="margin-left:auto;font-size:11px;cursor:pointer" title="Say safe bets out loud">'+
             (state.safeVoice===false?'🔇':'🔊')+'</span></div>'+
         '<div style="font-size:10.5px;line-height:1.45">'+line+'</div>'+
@@ -25145,6 +25157,12 @@ test('Safe Bet plays only a pair paying 1.7x on both that the Brain gives 95%, a
   assert.strictEqual(rec.n,3,'three plays - the race that closed at 1.6 is not one');
   assert.strictEqual(rec.w,2);assert.strictEqual(rec.worst,1);
   assert.deepStrictEqual(Array.from(rec.last),[1,0,1]);
+  // two losses in a row: the next play needs 98%, so a 97% pair is skipped
+  env.state.results=[race(1,5,['1.8/2','2.6/2','9/2']),race(2,5,['1.8/2','2.6/2','9/2']),race(3,5,['1.8/2','2.6/2','9/2'])];
+  const g=env.safeRecord();
+  assert.strictEqual(g.n,2,'the third 97% pair after two losses is not played');
+  assert.strictEqual(g.worst,2);
+  assert.strictEqual(env.safeNeed(2),0.98);assert.strictEqual(env.safeNeed(1),0.95);
 });
 
 console.log('Verified '+tests+' live-market checks.');

@@ -33,8 +33,8 @@ This repo is public, so neither secret is in the code. Add both under
 ## Safe Bet
 
 The home screen's 🧠 SAFE BET box says PLAY only when the Human Brain gives a
-pair at least 95% and both of its vehicles pay at least 1.7x; every other race
-is a SKIP. On 2,303 real races it played about one in eight, won 91.8%, never
+pair at least 95% (98% straight after two losses in a row) and both of its
+vehicles pay at least 1.7x; every other race is a SKIP. On 2,303 real races it played about one in eight, won 91.8%, never
 lost more than two in a row and returned +5.5% on the closing prices. Its own
 record (CTWL, last 10, return) is on the home screen and the Value page.
 

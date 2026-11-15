@@ -6503,8 +6503,9 @@ function posnumBacktest(forceMethod){
  * Consensus was stored.
  */
 // Counted as its own record, never as agreement the race had at the time.
-const AGREE_SKIP_KEYS=['BRAIN'];
-function replayedCall(r,k){ return k==='BRAIN'&&!!(r&&r.replayOrigins&&r.replayOrigins[k]); }
+const AGREE_SKIP_KEYS=['BRAIN','SAMEROAD','DIFFROAD'];
+const REPLAY_KEYS=['BRAIN','SAMEROAD','DIFFROAD'];   // models whose past calls are replays, tagged as such
+function replayedCall(r,k){ return REPLAY_KEYS.indexOf(k)>=0&&!!(r&&r.replayOrigins&&r.replayOrigins[k]); }
 function aiScoredRace(r){
   const e=r&&r.engineCalls;
   if(!e)return false;
@@ -8728,6 +8729,7 @@ function modelRecordsHTML() {
                  BLENDV1: 'Blend 27/30', POSNUM: 'Numbers', HUMAN: 'Human',
                  HUMAN1: 'Human Roads', HUMAN2: 'Human Odds', HUMAN3: 'Human Roads %',
                  RISK: 'Risk', ROADEXP: 'Road Expert', PATCH: 'Road Patch', BRAIN: 'Human Brain',
+                 SAMEROAD: 'Same Road', DIFFROAD: 'Diff Road',
                  CONSENSUSROAD: 'Consensus Roads', CONSENSUSALL: 'Consensus All', CONSENSUSALL1: 'Consensus All-1',
                  CONSENSUS: 'Consensus', CONSENSUS6: 'Consensus 6',
                  CONSENSUSRISKALL: 'Consensus Risk All', CONSENSUSRISK9: 'Consensus Risk 9-1' };
@@ -8879,7 +8881,9 @@ function roadModelTable(cleanOnly){
 function roadBestModel(roadI){
   if(roadI==null)return null;
   const t=roadModelTable(false);
-  const rows=t.byRoad[roadI];
+  // without the two history models: they are in the table to be read, and a
+  // model that can decline to call is not one Road Expert can follow
+  const rows=(t.byRoad[roadI]||[]).filter(function(x){ return HIST_KEYS.indexOf(x.key)<0; });
   if(!rows||!rows.length)return null;
   if((t.roadN[roadI]||0)<ROAD_MIN_RACES)return null;
   const lead=rows[0];
@@ -10593,6 +10597,213 @@ function brainWhyHTML(){
 }
 /* RXA_BRAIN_END */
 
+/* RXA_HIST_START
+   ══════════════════════════════════════════════════════════════════════
+   🔁 SAME ROAD and 🔀 DIFF ROAD - WHAT HAPPENED THE LAST TIMES THESE THREE MET
+
+   Every other model reasons about speed, price or the hidden roads. These two
+   do not reason at all. They look up the board: the same three vehicles have
+   lined up before - who won, and how often?
+
+     🔁 Same Road   the same three vehicles AND the same road on show
+     🔀 Diff Road   the same three vehicles, whatever road was on show
+
+   NOT BEFORE TEN. With fewer than ten past races of that board a count means
+   nothing, so the model makes no call at all - its row says how many it has.
+   The count starts from the 4,779 races built into the app (the table Edge
+   used) and every race logged here is added to it.
+
+   BY SHARE, NOT ALWAYS THE FAVOURITE. A model that always names the vehicle
+   that has won most never once names the one that wins one time in ten - and
+   one time in ten it wins. So each vehicle is the FIRST pick as often as it
+   has won: over ten calls on a board that went 6 / 3 / 1, the first pick is
+   the first vehicle six times, the second three times and the long shot once.
+   It keeps count of its own calls to do it - the long shot's turn comes when
+   it is owed one, not when a dice says so and not after a result. AND NEVER
+   LATER THAN ITS SHARE SAYS: a vehicle that has won one time in N is the first
+   pick at least once in every N calls on that board - when it has gone N-1
+   calls without a turn, the next call is its. The SECOND pick is always the
+   stronger of the other two, so the long shot's turn is covered by a favourite.
+
+   Pure: everything comes from the tally it is handed (default: the history),
+   and a race is predicted from the races before it.
+   ══════════════════════════════════════════════════════════════════════ */
+const HIST_MIN=10;          // past races of a board before it will call it
+const HIST_KEYS=['SAMEROAD','DIFFROAD'];
+function histTrio(vis){ return vis.slice().sort(function(a,b){ return a-b; }); }
+/** An empty count of what has been logged: per board, each vehicle's wins and
+ *  how often each model made it the first pick. */
+function histTallyNew(){ return {isHistTally:true,same:{},any:{}}; }
+function histCell(map,k){ return map[k]||(map[k]={w:[0,0,0],n:0,
+  q:{SAMEROAD:[0,0,0],DIFFROAD:[0,0,0]},      // first picks so far, per vehicle
+  s:{SAMEROAD:[0,0,0],DIFFROAD:[0,0,0]},      // calls since each vehicle's last turn
+  m:{SAMEROAD:0,DIFFROAD:0}}); }
+function histAdd(T,r){
+  if(!r||!r.vehicles||r.vehicles.length!==3||r.winner==null||r.road==null)return;
+  const t=histTrio(r.vehicles), wi=t.indexOf(r.winner);
+  if(wi<0||t[0]===t[1]||t[1]===t[2])return;
+  const tk=t.join(',');
+  const cells=[histCell(T.same,tk+'|'+r.road),histCell(T.any,tk)];
+  cells[0].w[wi]++; cells[0].n++; cells[1].w[wi]++; cells[1].n++;
+  const ec=r.engineCalls||{};
+  HIST_KEYS.forEach(function(K,ci){
+    const c=ec[K]; if(!c||c.vi==null)return;
+    const qi=t.indexOf(c.vi); if(qi<0)return;
+    const cl=cells[ci];
+    cl.q[K][qi]++; cl.m[K]++;
+    for(let j=0;j<3;j++)cl.s[K][j]=(j===qi)?0:cl.s[K][j]+1;
+  });
+}
+/** Counted in the order the races were run - "calls since its last turn" needs it. */
+function histTallyOf(rows){
+  const T=histTallyNew();
+  (rows||[]).filter(Boolean).slice().sort(function(a,b){ return (a.t||0)-(b.t||0); })
+    .forEach(function(r){ histAdd(T,r); });
+  return T;
+}
+/** The history as it stands, counted once and kept until the history changes. */
+function histLiveTally(){
+  try{ return historyMemo('histTally',function(){ return histTallyOf(state.results||[]); }); }
+  catch(e){ return histTallyOf((typeof state!=='undefined'&&state.results)||[]); }
+}
+/**
+ * Everything one model knows about one board.
+ *   t      the three vehicles, sorted       w / n   wins each, and races counted
+ *   mine   how many of those races are from this phone's own log
+ *   q / m  this model's own earlier first picks on the board, and how many calls
+ */
+function histThink(vis,roadI,KEY,src){
+  if(!vis||vis.length!==3||roadI==null)return null;
+  const T=(src&&src.isHistTally)?src:(src?histTallyOf(src):histLiveTally());
+  const same=(KEY==='SAMEROAD'), t=histTrio(vis), tk=t.join(',');
+  const w=[0,0,0]; let n=0;
+  const seed=function(s){ if(s&&s.length===4){ w[0]+=s[0]; w[1]+=s[1]; w[2]+=s[2]; n+=s[3]; } };
+  if(same)seed(EDGE_BOARD[tk+'|'+roadI]);
+  else for(let r=0;r<ROADS.length;r++)seed(EDGE_BOARD[tk+'|'+r]);
+  const cell=same?T.same[tk+'|'+roadI]:T.any[tk];
+  let mine=0, q=[0,0,0], since=[0,0,0], m=0;
+  if(cell){ w[0]+=cell.w[0]; w[1]+=cell.w[1]; w[2]+=cell.w[2]; n+=cell.n; mine=cell.n;
+            q=cell.q[KEY].slice(); since=cell.s[KEY].slice(); m=cell.m[KEY]; }
+  return {t:t,w:w,n:n,mine:mine,q:q,since:since,m:m,p:n?w.map(function(x){ return x/n; }):[0,0,0]};
+}
+function engHIST(KEY,vis,roadI,slotI,src){
+  const none={vi:null,pct:0,vi2:null,pct2:0};
+  const h=histThink(vis,roadI,KEY,src);
+  if(!h||h.n<HIST_MIN)return none;
+  // board order breaks a dead heat, so the same board always gives the same answer
+  const ord=function(i){ return vis.indexOf(h.t[i]); };
+  // owed = the share of the calls it should have had by now, less the calls it has had
+  const owed=h.p.map(function(p,i){ return p*(h.m+1)-h.q[i]; });
+  let first=[0,1,2].sort(function(a,b){ return (owed[b]-owed[a])||(h.p[b]-h.p[a])||(ord(a)-ord(b)); })[0];
+  // ...but a vehicle that wins one time in N is never left N calls without a
+  // turn: if this is the last call of its window, the call is its. The rarest
+  // one first - the favourites get theirs back on the very next call.
+  const due=[0,1,2].filter(function(i){ return h.p[i]>0&&h.since[i]>=Math.ceil(1/h.p[i])-1; })
+    .sort(function(a,b){ return (h.p[a]-h.p[b])||(ord(a)-ord(b)); });
+  let turn=false;
+  if(due.length&&due[0]!==first&&h.p[due[0]]<h.p[first]){ first=due[0]; turn=true; }
+  const rest=[0,1,2].filter(function(i){ return i!==first; })
+    .sort(function(a,b){ return (h.p[b]-h.p[a])||(ord(a)-ord(b)); });
+  return {vi:h.t[first],pct:Math.round(h.p[first]*100),
+          vi2:h.t[rest[0]],pct2:Math.round(h.p[rest[0]]*100),
+          vi3:h.t[rest[1]],pct3:Math.round(h.p[rest[1]]*100),turn:turn};
+}
+function engSAMEROAD(vis,roadI,slotI,rows){ return engHIST('SAMEROAD',vis,roadI,slotI,rows); }
+function engDIFFROAD(vis,roadI,slotI,rows){ return engHIST('DIFFROAD',vis,roadI,slotI,rows); }
+/**
+ * What it has seen, in one line under its row: how many past races of this
+ * board, each vehicle's share of them, and - when the first pick is not the one
+ * that has won most - that this is that vehicle's turn. Before ten races it
+ * says how many it has instead of making a call.
+ */
+function histWhyHTML(KEY){
+  try{
+    if(!(sel3&&sel3.length===3&&selRoad!=null&&selSlot!=null))return '';
+    const h=histThink(sel3,selRoad,KEY);
+    if(!h)return '';
+    const where=(KEY==='SAMEROAD')?('on '+ROADS[selRoad].icon+' '+ROADS[selRoad].name):'on any road';
+    const box=function(inner){ return '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;'+
+      'font-size:9.5px;padding:5px 8px;margin-top:5px;border-radius:8px;'+
+      'background:var(--bg3);border:1px solid var(--border2)">'+inner+'</div>'; };
+    if(h.n<HIST_MIN)
+      return box('<span style="color:var(--text3);font-weight:800">NO CALL YET</span>'+
+        '<span style="color:var(--text2)">needs '+HIST_MIN+' past races of these three '+where+
+        ' &mdash; has '+h.n+'</span>');
+    const c=engHIST(KEY,sel3,selRoad,selSlot);
+    const by=[0,1,2].sort(function(a,b){ return (h.p[b]-h.p[a])||(a-b); });
+    const shares=by.map(function(i){ const v=ALL_VEHICLES[h.t[i]];
+      return v.icon+' '+h.w[i]+'/'+h.n; }).join(' &middot; ');
+    const fi=h.t.indexOf(c.vi);
+    const turn=(fi>=0&&fi!==by[0]&&h.p[fi]>0)
+      ? '<span style="flex-basis:100%;height:0"></span>'+
+        '<span style="color:var(--gold);font-weight:800">🎲 ITS TURN</span>'+
+        '<span style="color:var(--text)">'+ALL_VEHICLES[c.vi].icon+' '+ALL_VEHICLES[c.vi].name+
+        ' has won '+h.w[fi]+' of '+h.n+' &mdash; first pick about 1 call in '+
+        Math.max(2,Math.round(1/h.p[fi]))+'</span>'
+      : '';
+    return box('<span style="color:var(--text3);font-weight:800">SEEN</span>'+
+      '<span style="color:var(--text);font-weight:800">'+h.n+' times '+where+
+      (h.mine?' ('+h.mine+' yours)':'')+'</span>'+
+      '<span style="color:var(--text2)">'+shares+'</span>'+turn);
+  }catch(e){ return ''; }
+}
+/**
+ * Give both history models a record on races logged before they existed.
+ *
+ * In the order the races were run, each from the count as it stood before it -
+ * the same engine, handed the tally built so far - and tagged as a replay.
+ * A race the model would not have called (fewer than ten past races of that
+ * board at the time) gets no call, exactly as it would not have then. Nothing
+ * else on any race is touched. In idle slices, once per start.
+ */
+let _histFill=null,_histFilled=false;
+function histBackfill(quiet){
+  if(_histFill||_histFilled)return 0;
+  const cutoff=state.accResetT||0;
+  const want=function(r,K){ return r&&r.winner!=null&&(r.t||0)>=cutoff&&r.engineCalls&&!r.engineCalls[K]&&
+    aiScoredRace(r)&&r.vehicles&&r.vehicles.length===3&&r.road!=null&&r.slot!=null; };
+  const all=(state.results||[]).filter(Boolean).slice().sort(function(a,b){ return (a.t||0)-(b.t||0); });
+  if(!all.some(function(r){ return want(r,'SAMEROAD')||want(r,'DIFFROAD'); })){ _histFilled=true; return 0; }
+  const job=_histFill={i:0,filled:0,T:histTallyNew()};
+  const later=(typeof requestIdleCallback==='function')
+    ? function(f){ requestIdleCallback(f,{timeout:300}); }
+    : function(f){ setTimeout(f,16); };
+  const step=function(deadline){
+    if(_histFill!==job)return;
+    const t0=Date.now();
+    const budget=Math.min(8,(deadline&&deadline.timeRemaining)?Math.max(2,deadline.timeRemaining()):8);
+    while(job.i<all.length&&Date.now()-t0<budget){
+      const r=all[job.i++];
+      HIST_KEYS.forEach(function(K){
+        if(!want(r,K))return;
+        let c=null;
+        try{ c=engHIST(K,r.vehicles.slice(),r.road,r.slot,job.T); }catch(e){}
+        if(c&&c.vi!=null&&c.vi2!=null){
+          r.engineCalls[K]={vi:c.vi,vi2:c.vi2};
+          r.replayOrigins=r.replayOrigins||{};
+          r.replayOrigins[K]={version:'HIST-backfill-1',origin:'replay',historicalInputsVerified:false};
+          job.filled++;
+        }
+      });
+      histAdd(job.T,r);      // after its own call: a race is never part of its own history
+    }
+    if(job.i<all.length){ later(step); return; }
+    _histFill=null; _histFilled=true;
+    if(!job.filled)return;
+    window.rxCallsGen=(window.rxCallsGen||0)+1;
+    try{invalidateRoadTable();}catch(e){}
+    try{_selfTallyCache=null;}catch(e){}
+    try{if(window.RXABundle&&RXABundle._invalidate)RXABundle._invalidate();}catch(e){}
+    try{renderMemoClear();}catch(e){}
+    save();
+    if(!quiet)showToast('🔁 Same Road and 🔀 Diff Road scored across your past races','#00E5A0');
+    try{refreshActiveTab();}catch(e){}
+  };
+  later(step);
+  return 0;
+}
+/* RXA_HIST_END */
+
 
 // ══════════════════════════════════════════════════════════════════════
 // EDGE — ONE SCORE PER VEHICLE, INSTEAD OF THIRTEEN VOTES COUNTED
@@ -11710,6 +11921,8 @@ const ENGINES=[
   {key:'RISK',name:'Risk 🎲',fn:engRISK},
   {key:'PATCH',name:'Road Patch 🧩',fn:engPATCH},
   {key:'BRAIN',name:'🧠 Human Brain',fn:engBRAIN},
+  {key:'SAMEROAD',name:'🔁 Same Road',fn:engSAMEROAD},
+  {key:'DIFFROAD',name:'🔀 Diff Road',fn:engDIFFROAD},
 ];
 /* EDGE WAS HERE.
    Removed on request, and the reason is worth keeping: priced at the odds the
@@ -11748,7 +11961,10 @@ const ENGINES=[
 // stand on is a two-pick number. A model that improves the half nothing
 // depends on, and does not improve the half everything depends on, has
 // not yet earned the right to move them.
-const NO_VOTE_KEYS=['POSNUM','HUMAN','HUMAN1','HUMAN2','HUMAN3','ROADEXP','RISK','PATCH','EDGE'];
+const NO_VOTE_KEYS=['POSNUM','HUMAN','HUMAN1','HUMAN2','HUMAN3','ROADEXP','RISK','PATCH','EDGE',
+  // the two history models sometimes make no call at all, and name the long shot on
+  // purpose when it is its turn - there to be read and followed by choice, not counted
+  'SAMEROAD','DIFFROAD'];
 
 /**
  * The consensus votes, each one a different answer to "who gets a say".
@@ -12070,7 +12286,7 @@ const CONSENSUS_ROWS=['CONSENSUS','CONSENSUS6'].concat(
  */
 function orderedModelKeys(){
   const pref=['PAYOUT','UPGRADED','CONSENSUS','CONSENSUS6','CONSENSUSROAD','CONSENSUSALL',
-              'CONSENSUSALL1','CONSENSUSRISKALL','CONSENSUSRISK9','ROADEXP','RISK','HUMAN','BRAIN',
+              'CONSENSUSALL1','CONSENSUSRISKALL','CONSENSUSRISK9','ROADEXP','RISK','HUMAN','BRAIN','SAMEROAD','DIFFROAD',
               'ROAD','BLENDV2','BLENDV1','POSNUM'];
   const all=ENGINES.map(e=>e.key).concat(CONSENSUS_ROWS);
   const out=[],seen={};
@@ -12517,7 +12733,7 @@ function partialPredHTML(){
     CONSENSUS6:'Consensus 6',
     CONSENSUSROAD:'Consensus Roads',CONSENSUSALL:'Consensus All',CONSENSUSALL1:'Consensus All-1',
     CONSENSUSRISKALL:'Consensus Risk All',CONSENSUSRISK9:'Consensus Risk 9-1',
-    RISK:'Risk',BRAIN:'Human Brain'};
+    RISK:'Risk',BRAIN:'Human Brain',SAMEROAD:'Same Road',DIFFROAD:'Diff Road'};
 
   const accBy={};
   try{engineAccuracy().forEach(a=>accBy[a.key]=a);}catch(e){}
@@ -12800,7 +13016,7 @@ function showPredBox(){
     CONSENSUS6:'Consensus 6',
     CONSENSUSROAD:'Consensus Roads',CONSENSUSALL:'Consensus All',CONSENSUSALL1:'Consensus All-1',
     CONSENSUSRISKALL:'Consensus Risk All',CONSENSUSRISK9:'Consensus Risk 9-1',
-    RISK:'Risk',BRAIN:'Human Brain'};
+    RISK:'Risk',BRAIN:'Human Brain',SAMEROAD:'Same Road',DIFFROAD:'Diff Road'};
   // build a lookup for each model's picks
   const pickOf={};
   engs.forEach(e=>{pickOf[e.key]={vi:e.vi,vi2:e.vi2,pct:e.pct,pct2:e.pct2,pct3:e.pct3};});
@@ -12894,6 +13110,7 @@ function showPredBox(){
       </div>
       ${key==='HUMAN'?(function(){try{return humanRoadsHTML();}catch(e){return '';}})():''}
       ${key==='BRAIN'?(function(){try{return brainWhyHTML();}catch(e){return '';}})():''}
+      ${(key==='SAMEROAD'||key==='DIFFROAD')?(function(){try{return histWhyHTML(key);}catch(e){return '';}})():''}
     </div>`;
   }).join('');
 
@@ -15125,7 +15342,9 @@ function openOutcomeModal(){
   if(aiReady()){
     try{
       const epsAll=allEnginePredictions(sel3,selRoad,selSlot);
-      epsAll.forEach(e=>{engineCalls[e.key]={vi:e.vi,vi2:e.vi2};}); // still store every model's call
+      // every model's call - except a model that made none, which is stored as nothing
+      // at all rather than as a pair of blanks every table would score as a miss
+      epsAll.forEach(e=>{ if(e.vi!=null)engineCalls[e.key]={vi:e.vi,vi2:e.vi2}; });
       // Edge used to be recorded here by name, sitting outside the sweep.
       // It is not a model any more, so nothing is written for it - and the
       // races that already carry one keep it.
@@ -17049,6 +17268,7 @@ try{
                          try{patchBackfill(false);}catch(e){}
                          // after consensusBackfill: no Consensus row is filled from a replayed vote
                          try{brainBackfill(false);}catch(e){}
+                         try{histBackfill(false);}catch(e){}
                          // and Edge, which arrived after every race here was
                          // logged and would otherwise sit with no record at all
                          try{edgeBackfill(false);}catch(e){}};
@@ -18411,6 +18631,7 @@ function mgDots(h){
 function modelGuardTableHTML(){
   try{ patchBackfill(true); }catch(e){}
   try{ brainBackfill(true); }catch(e){}
+  try{ histBackfill(true); }catch(e){}
   try{ edgeBackfill(true); }catch(e){}
   // Edge's strictness dial used to sit here. The page that replaced it asks
   // the question that turned out to matter - not how sure a model is, but

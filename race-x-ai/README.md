@@ -52,6 +52,12 @@ vehicles pay at least 1.7x; every other race is a SKIP. On 2,303 real races it p
 lost more than two in a row and returned +5.5% on the closing prices. Its own
 record (CTWL, last 10, return) is on the home screen and the Value page.
 
+The cog on the Safe Bet box opens its settings: how sure the Brain must be
+(90-98%) and how much a win must pay (any, or 1.10x-1.40x on a split stake).
+Every combination is replayed over the races logged on the phone, and the sheet
+shows which kept 90% with no more than two losses in a row. Bigger wins lose
+more often; the sheet shows by how much on those races.
+
 Both halves are checked before the APK is built:
 
 - 55 board-reader checks run on a desktop (`desktop-check/RaceWatcherCheck.java`).

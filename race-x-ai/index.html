@@ -2925,7 +2925,7 @@ function menuGo(what){
       'board can be switched off.</p>'+
 
       '<h4>&#127942; THE MODELS</h4>'+
-      '<p><b>Fourteen models and seven consensus rows</b> run on every race, each carrying its own '+
+      '<p><b>Sixteen models and seven consensus rows</b> run on every race, each carrying its own '+
       'live accuracy, longest losing run and last ten:</p>'+
       '<p><b>Payout</b> &mdash; the price list against the win rate.<br>'+
       '<b>Upgraded &#11088;</b> &mdash; the all-round model, and the app&rsquo;s headline pick.<br>'+
@@ -2940,6 +2940,10 @@ function menuGo(what){
       '<b>&#129504; Human Brain</b> &mdash; thinks about the two hidden roads first, from a memory of the '+
       'roads seen lately, pictures every track they could make and races the three on each. It takes '+
       'the risky vehicle when the hidden roads probably suit it, and it votes in every Consensus row.<br>'+
+      '<b>&#128257; Same Road</b> and <b>&#128256; Diff Road</b> &mdash; look up what happened the last times '+
+      'these same three vehicles met (on this road, or on any road). No call before ten past races; '+
+      'then each vehicle is the first pick as often as it has won, so the long shot gets its turn. '+
+      'They do not vote.<br>'+
       '<b>Numbers &#128290;</b> &mdash; reads only the run of winning positions. It has scored '+
       '31% over 891 races, below the 33% you get by guessing, and gets no vote.</p>'+
       '<p><b>Consensus</b> rows vote across different sets of the above &mdash; Consensus 6, '+
@@ -3166,6 +3170,12 @@ function menuGo(what){
 
       '<h4>&#9878;&#65039; BLEND 20/31 &amp; BLEND 27/30</h4>'+
       '<p>Two different <b>mixes of payout and road</b> weighting. The numbers are the ratio each uses. Having both lets you see which balance suits the game better over time.</p>'+
+
+      '<h4>&#128257; SAME ROAD &nbsp;&middot;&nbsp; &#128256; DIFF ROAD</h4>'+
+      '<p>Two models that do no reasoning at all: they <b>look up the board</b>. The same three vehicles have lined up before &mdash; who won, and how often? <b>Same Road</b> counts only races with the same three vehicles <b>and</b> the same road on show; <b>Diff Road</b> counts the same three vehicles on any road. The count starts from the 4,779 races built into the app and every race you log is added.</p>'+
+      '<p><b>Not before ten.</b> With fewer than ten past races of that board the model makes no call &mdash; its row says how many it has, and the voice stays quiet if you have it selected.</p>'+
+      '<p><b>By share, not always the favourite.</b> Each vehicle is the <b>first pick</b> as often as it has won. On a board that went 6 / 3 / 1, ten calls name the first vehicle six times, the second three times and the long shot once &mdash; and a vehicle that has won one time in N is never left N calls without its turn. The row says <b>&#127922; ITS TURN</b> when that is why. The second pick is always the stronger of the other two.</p>'+
+      '<p style="font-size:11px;color:#8a8a8a">Naming the long shot on its turn costs a few points of accuracy against always naming the two favourites &mdash; that is the price of a model that is not the same answer every time. They get no Consensus vote, and Best, Adaptive and Road Expert never follow them; tick one yourself to hear it.</p>'+
 
       '<h4>&#129504; SAFE BET</h4>'+
       '<p>Not a model, a rule for <b>when to bet at all</b>. Of the three pairs on the board it keeps those where <b>both</b> vehicles pay at least <b>1.7x</b>, takes the one the Human Brain is surest of, and says <b>PLAY</b> only when the Brain gives that pair <b>95% or more</b> &mdash; <b>98%</b> straight after two losses in a row. Every other race is a <b>SKIP</b>.</p>'+
@@ -8720,6 +8730,18 @@ function roadBreakdownHTML(){
 function modelRecordsHTML() {
   const keys = ENGINES.map(e => e.key).concat(['CONSENSUS', 'CONSENSUS6'], NEW_CONSENSUS);
   const all = keys.map(modelRecord);
+  // The Safe Bet rule beside the models it is built on: the one row here that
+  // is allowed to skip races, which is how it holds 90% and a short losing run
+  // where no model that bets every race can.
+  try {
+    const sr = (typeof safeRecord === 'function') ? safeRecord() : null;
+    if (sr && sr.n) {
+      const lossRate = 1 - sr.w / sr.n;
+      all.push({ key: 'SAFE95', n: sr.n, pct: 100 * sr.w / sr.n, cltw: sr.worst, b2b: sr.b2b || 0,
+                 exp: Math.round((sr.n - 1) * lossRate * lossRate * 10) / 10,
+                 last10: sr.last.filter(Boolean).length, last10n: sr.last.length });
+    }
+  } catch (e) { }
   // A model with almost no races has no record worth quoting, but hiding it
   // makes it look like it does not exist. It gets a row saying so instead.
   const recs = all.filter(r => r.n >= 20).sort((a, b) => b.pct - a.pct);
@@ -8730,6 +8752,7 @@ function modelRecordsHTML() {
                  HUMAN1: 'Human Roads', HUMAN2: 'Human Odds', HUMAN3: 'Human Roads %',
                  RISK: 'Risk', ROADEXP: 'Road Expert', PATCH: 'Road Patch', BRAIN: 'Human Brain',
                  SAMEROAD: 'Same Road', DIFFROAD: 'Diff Road',
+                 SAFE95: '🧠 Safe Bet (skips most races)',
                  CONSENSUSROAD: 'Consensus Roads', CONSENSUSALL: 'Consensus All', CONSENSUSALL1: 'Consensus All-1',
                  CONSENSUS: 'Consensus', CONSENSUS6: 'Consensus 6',
                  CONSENSUSRISKALL: 'Consensus Risk All', CONSENSUSRISK9: 'Consensus Risk 9-1' };
@@ -13101,12 +13124,15 @@ function showPredBox(){
         <span style="display:flex;flex-direction:column;width:66px"><span style="font-size:10px;font-weight:800;color:var(--text)">${NAMEMAP[key]||rowName(key)}</span>${
           pk.follows?`<span style="font-size:7px;color:var(--text3)">follows ${NAMEMAP[pk.follows]||pk.follows}</span>`:accTxt
         }</span>
-        <div style="flex:1;display:flex;align-items:center;gap:5px;justify-content:flex-end">
+        ${pk.vi==null
+          // a model that made no call for this board says so, instead of three blanks and a percentage that is not its own
+          ? `<div style="flex:1;text-align:right;font-size:9.5px;font-weight:700;color:var(--text3)">no call for this board</div>`
+          : `<div style="flex:1;display:flex;align-items:center;gap:5px;justify-content:flex-end">
           <span style="display:flex;flex-direction:column;align-items:center"><span style="font-size:17px">${va?va.icon:'—'}</span><span style="font-size:8px;color:var(--green);font-weight:800">${pctA!=null?pctA+'%':'HIGH'}</span></span>
           <span style="display:flex;flex-direction:column;align-items:center;opacity:.92"><span style="font-size:15px">${vb?vb.icon:'—'}</span><span style="font-size:8px;color:var(--gold);font-weight:700">${pctB!=null?pctB+'%':'NEXT'}</span></span>
           <span style="display:flex;flex-direction:column;align-items:center;opacity:.5"><span style="font-size:12px">${vc?vc.icon:'—'}</span><span style="font-size:8px;color:var(--text3)">${pctC!=null?pctC+'%':'low'}</span></span>
         </div>
-        <button class="speaker-btn" style="width:23px;height:23px;font-size:11px;flex-shrink:0" onclick="speakModel(${pk.vi},${pk.vi2})">🔊</button>
+        <button class="speaker-btn" style="width:23px;height:23px;font-size:11px;flex-shrink:0" onclick="speakModel(${pk.vi},${pk.vi2})">🔊</button>`}
       </div>
       ${key==='HUMAN'?(function(){try{return humanRoadsHTML();}catch(e){return '';}})():''}
       ${key==='BRAIN'?(function(){try{return brainWhyHTML();}catch(e){return '';}})():''}
@@ -24859,7 +24885,7 @@ function safeRecord(){
   return historyMemo('safeRecord',function(){
     const cutoff=state.accResetT||0;
     const R=(state.results||[]).filter(r=>r&&r.winner!=null&&(r.t||0)>=cutoff).slice().sort((a,b)=>(a.t||0)-(b.t||0));
-    let n=0,w=0,w1=0,ret=0,run=0,worst=0,replay=0,seen=0;const last=[];
+    let n=0,w=0,w1=0,ret=0,run=0,worst=0,replay=0,seen=0,b2b=0;const last=[];
     for(const r of R){
       const v=safeRaceVerdict(r,safeNeed(run));
       if(!v)continue;
@@ -24868,10 +24894,10 @@ function safeRecord(){
       const a=r.vehicles[v.a], b=r.vehicles[v.b], won=(r.winner===a||r.winner===b);
       n++; if(r.brainPFrom==='replay')replay++;
       if(won){ w++; ret+=v.pa*v.pb/(v.pa+v.pb); run=0; if(r.winner===a)w1++; }
-      else { run++; if(run>worst)worst=run; }
+      else { if(run>0)b2b++; run++; if(run>worst)worst=run; }
       last.push(won?1:0); if(last.length>10)last.shift();
     }
-    return {n:n,w:w,w1:w1,ret:ret,worst:worst,last:last,replay:replay,seen:seen,run:run};
+    return {n:n,w:w,w1:w1,ret:ret,worst:worst,last:last,replay:replay,seen:seen,run:run,b2b:b2b};
   });
 }
 (function(){
@@ -25384,6 +25410,53 @@ test('Safe Bet plays only a pair paying 1.7x on both that the Brain gives 95%, a
   assert.strictEqual(g.n,2,'the third 97% pair after two losses is not played');
   assert.strictEqual(g.worst,2);
   assert.strictEqual(env.safeNeed(2),0.98);assert.strictEqual(env.safeNeed(1),0.95);
+});
+
+test('Same Road and Diff Road wait for ten races, then give each vehicle its share of first picks',()=>{
+  const env={console,Math,JSON,Object,Array,ROADS:[0,1,2,3,4,5],state:{results:[],accResetT:0},window:{},
+    EDGE_BOARD:{'0,4,8|2':[60,30,10,100],'1,2,3|0':[3,2,1,6],'1,2,3|5':[2,2,1,5]}};
+  vm.createContext(env);
+  vm.runInContext('historyMemo=(n,f)=>f();aiScoredRace=()=>true;save=()=>{};showToast=()=>{};refreshActiveTab=()=>{};'+
+    'renderMemoClear=()=>{};invalidateRoadTable=()=>{};setTimeout=f=>f();',env);
+  vm.runInContext(html.match(/\/\* RXA_HIST_START[\s\S]*?\/\* RXA_HIST_END \*\//)[0].replace(/^const /gm,'var '),env);
+  // not before ten: 6 races on this road, 11 over all roads
+  assert.strictEqual(env.engSAMEROAD([1,2,3],0,0,[]).vi,null,'six races of the board: no call');
+  const any=env.engDIFFROAD([3,1,2],0,0,[]);
+  assert.strictEqual(any.vi,1,'the same three on any road: eleven races, and a call');
+  assert.deepStrictEqual([any.pct,any.pct2,any.pct3],[45,36,18]);
+  assert.strictEqual(env.engSAMEROAD([0,4,8],3,0,[]).vi,null,'Same Road means the same road');
+  // by share: a board that has gone 60 / 30 / 10, forty calls, each logged with its call
+  const vis=[0,4,8],R=[],picks=[],wins=[0,0,0,0,0,0,4,4,4,8];
+  for(let k=0;k<40;k++){
+    const c=env.engSAMEROAD(vis,2,0,R);
+    if(c.vi===8)assert.strictEqual(c.vi2,0,'the long shot\'s turn is covered by the favourite');
+    picks.push(c.vi);
+    R.push({t:k+1,vehicles:vis,road:2,slot:0,winner:wins[k%10],engineCalls:{SAMEROAD:{vi:c.vi,vi2:c.vi2}}});
+  }
+  const count=v=>picks.filter(x=>x===v).length;
+  assert.deepStrictEqual([count(0),count(4),count(8)],[24,12,4],'first picks in proportion: 60% / 30% / 10% of forty');
+  let wait=0,last=-1;picks.forEach((x,i)=>{ if(x===8){ wait=Math.max(wait,i-last); last=i; } });
+  assert(Math.max(wait,picks.length-last)<=11,'and the one-in-ten vehicle never waits past its window');
+  assert.strictEqual(JSON.stringify(env.engSAMEROAD([8,0,4],2,1,R)),JSON.stringify(env.engSAMEROAD([4,8,0],2,2,R)),
+    'the same board in another order is the same call');
+  assert.strictEqual(env.histThink(vis,2,'SAMEROAD',R).mine,40,'the races logged here are counted on top of the built-in ones');
+  // the replay: each old race from the count before it, none from its own
+  env.EDGE_BOARD={};
+  env.state.results=Array.from({length:14},(_,i)=>({t:i+1,vehicles:[5,6,7],road:1,slot:0,winner:[5,5,6,7][i%4],engineCalls:{CONSENSUS:{vi:5,vi2:6}}}));
+  env.histBackfill(true);
+  const got=env.state.results.map(r=>r.engineCalls.SAMEROAD?1:0).join('');
+  assert.strictEqual(got,'00000000001111','no call until ten races of the board had been run');
+  const r11=env.state.results[10];
+  const want11=env.engSAMEROAD([5,6,7],1,0,env.state.results.slice(0,10).map(r=>({t:r.t,vehicles:r.vehicles,road:r.road,winner:r.winner,engineCalls:{}})));
+  assert.strictEqual(JSON.stringify(r11.engineCalls.SAMEROAD),JSON.stringify({vi:want11.vi,vi2:want11.vi2}),
+    'and the eleventh race is called from the ten before it');
+  assert.strictEqual(r11.replayOrigins.SAMEROAD.origin,'replay');
+  assert.strictEqual(JSON.stringify(r11.engineCalls.CONSENSUS),'{"vi":5,"vi2":6}','nothing else on the race is touched');
+  // read, not counted
+  for(const list of ['NO_VOTE_KEYS','AGREE_SKIP_KEYS','REPLAY_KEYS']){
+    const src=html.match(new RegExp('const '+list+'=\\[[^\\]]*\\]'))[0];
+    assert(src.includes("'SAMEROAD'")&&src.includes("'DIFFROAD'"),list+' names both');
+  }
 });
 
 console.log('Verified '+tests+' live-market checks.');

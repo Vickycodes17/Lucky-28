@@ -30,6 +30,20 @@ This repo is public, so neither secret is in the code. Add both under
   A race whose vehicles were corrected by hand, or that was never read, gets
   no price, and Value leaves it out rather than guessing.
 
+## Same Road and Diff Road
+
+Two models that look up the board instead of reasoning about it: what happened
+the last times these same three vehicles met, on the same road (Same Road) or
+on any road (Diff Road). They count the 4,779 races built into the app plus
+every race logged on the phone.
+
+- No call before ten past races of the board.
+- Each vehicle is the first pick as often as it has won, and a vehicle that has
+  won one time in N is never left N calls without a turn. The second pick is
+  the stronger of the other two.
+- They do not vote in Consensus, and Best, Adaptive and Road Expert never
+  follow them.
+
 ## Safe Bet
 
 The home screen's 🧠 SAFE BET box says PLAY only when the Human Brain gives a

@@ -3180,6 +3180,8 @@ function menuGo(what){
       '<h4>&#129504; SAFE BET</h4>'+
       '<p>Not a model, a rule for <b>when to bet at all</b>. Of the three pairs on the board it keeps those where <b>both</b> vehicles pay at least <b>1.7x</b>, takes the one the Human Brain is surest of, and says <b>PLAY</b> only when the Brain gives that pair <b>95% or more</b> &mdash; <b>98%</b> straight after two losses in a row. Every other race is a <b>SKIP</b>.</p>'+
       '<p>It plays about one race in eight. On the five backups (2,303 races) it won 91.8% of its plays, never lost more than two in a row, and returned +5.5% on the closing prices. Three losses in a row can still happen &mdash; at that hit rate about once in two thousand bets &mdash; and its record on the home screen and the Value page shows every play, judged on the price the race closed at.</p>'+
+      '<p><b>Break-even.</b> Under every PLAY the box says how often the bet has to win to be worth making: a split stake that comes back 1.09x only pays if it wins more than 92 times in 100. A PLAY whose break-even is higher than its record is a bet to leave.</p>'+
+      '<p><b>&#9208;&#65039; It pauses by itself.</b> Safe Bet trusts the Human Brain, so it watches it: if the Brain&rsquo;s last 50 races fall well below its usual rate &mdash; further than luck explains &mdash; the box says PAUSED and why, and it starts again when the last 50 recover. That is for the day the game itself is changed.</p>'+
       '<p><b>&#9881;&#65039; Settings.</b> Tap the cog on the Safe Bet box to test other settings on your own logged races: how sure the Brain must be (90&ndash;98%), and how much a win must pay (any, or 1.10x&ndash;1.40x on a split stake). The sheet shows, for each, how often it won, its longest losing run and its return per bet, and marks the ones that kept 90% with no more than two losses in a row. Bigger wins lose more often &mdash; the sheet shows by how much on your races.</p>'+
 
       '<h4>READING THE ROW</h4>'+
@@ -17345,7 +17347,10 @@ try{
   const warm=function(f){ if(window.requestIdleCallback)requestIdleCallback(f,{timeout:8000}); else setTimeout(f,2500); };
   warm(function(){ try{surfModelSoon();}catch(e){} warm(function(){ try{surfWidthModelSoon();}catch(e){}
     // and Guard's history, one band at a time, so the first board finds it ready
-    warm(function(){ try{guardRaces();}catch(e){} warm(function(){ try{modelBandTables();}catch(e){} }); }); }); });
+    warm(function(){ try{guardRaces();}catch(e){} warm(function(){ try{modelBandTables();}catch(e){}
+      // and the two counts the newest features make once per history - the history
+      // models' tally and Safe Bet's replay - so the first board does not pay for them
+      warm(function(){ try{histLiveTally();}catch(e){} warm(function(){ try{ if(typeof safeRecord==='function')safeRecord(); }catch(e){} }); }); }); }); }); });
 }catch(e){}
 try{loadMusicLibrary();}catch(e){}
 try{if(ytKey()&&(location.protocol==='https:'||location.protocol==='http:'))ytLoadApi();}catch(e){}
@@ -24939,6 +24944,35 @@ function safeRaceVerdict(r,need,minRet){
   if(!odds||odds.length!==3)return null;
   return safeVerdict(r.brainP,odds.map(safePrice),need,minRet);
 }
+// ── AND IT STOPS BY ITSELF IF THE GAME STOPS BEHAVING ──
+//
+// Everything above trusts the Human Brain's chances. If the game is changed on
+// the server - a new speed chart, a different way of drawing the roads - those
+// chances are wrong, and nothing on the screen says so: the rule goes on saying
+// PLAY at "96%" while the Brain is getting two races in three.
+//
+// So the Brain is watched. Its last 50 called races against its usual rate: if
+// the last 50 are further below the usual rate than luck explains (3 standard
+// errors), Safe Bet PAUSES and says why, and starts again by itself when the
+// last 50 are back in range. It is a fuse, not a predictor: on the old history
+// a bad recent run did not make the next race likelier to lose, so this is not
+// expected to trip on an ordinary day. Simulated: with nothing changed it is
+// paused on about 1 race in 3,000; a game changed so the Brain drops from 82%
+// to 60% trips it after about 40 races, to 50% after about 30. (At 2.5 errors
+// it tripped in half of all long histories for no reason, so it is 3.)
+const SAFE_DRIFT_N=50, SAFE_DRIFT_MIN=150, SAFE_DRIFT_Z=3;
+function safeDriftNew(){ return {q:[],sum:0,all:0,hit:0}; }
+function safeDriftAdd(d,hit){
+  const h=hit?1:0;
+  d.q.push(h); d.sum+=h; if(d.q.length>SAFE_DRIFT_N)d.sum-=d.q.shift();
+  d.all++; d.hit+=h;
+}
+function safeDriftState(d){
+  const n=d.q.length, usual=d.all?d.hit/d.all:null, recent=n?d.sum/n:null;
+  if(d.all<SAFE_DRIFT_MIN||n<SAFE_DRIFT_N)return {paused:false,armed:false,n:n,got:d.sum,recent:recent,usual:usual,seen:d.all};
+  const floor=usual-SAFE_DRIFT_Z*Math.sqrt(usual*(1-usual)/SAFE_DRIFT_N);
+  return {paused:recent<floor,armed:true,n:n,got:d.sum,recent:recent,usual:usual,floor:floor,seen:d.all};
+}
 /** The races a record is replayed over, in the order they were run. */
 function safeRaces(){
   const cutoff=state.accResetT||0;
@@ -24947,19 +24981,26 @@ function safeRaces(){
 /** What one setting of the two dials would have done over those races. */
 function safeRecordFor(pair,minRet,R){
   R=R||safeRaces();
-  let n=0,w=0,w1=0,ret=0,run=0,worst=0,replay=0,seen=0,b2b=0;const last=[];
+  let n=0,w=0,w1=0,ret=0,run=0,worst=0,replay=0,seen=0,b2b=0,held=0;const last=[];
+  const drift=safeDriftNew();
   for(const r of R){
+    // judged on the Brain's record BEFORE this race; its result on this one counts afterwards
+    const paused=safeDriftState(drift).paused;
+    const bc=r.engineCalls&&r.engineCalls.BRAIN;
+    if(bc&&bc.vi!=null)safeDriftAdd(drift,(r.winner===bc.vi||r.winner===bc.vi2));
     const v=safeRaceVerdict(r,safeNeed(run,pair),minRet);
     if(!v)continue;
     seen++;
     if(!v.play)continue;
+    if(paused){ held++; continue; }          // a play it would have made, sat out
     const a=r.vehicles[v.a], b=r.vehicles[v.b], won=(r.winner===a||r.winner===b);
     n++; if(r.brainPFrom==='replay')replay++;
     if(won){ w++; ret+=v.pa*v.pb/(v.pa+v.pb); run=0; if(r.winner===a)w1++; }
     else { if(run>0)b2b++; run++; if(run>worst)worst=run; }
     last.push(won?1:0); if(last.length>10)last.shift();
   }
-  return {n:n,w:w,w1:w1,ret:ret,worst:worst,last:last,replay:replay,seen:seen,run:run,b2b:b2b};
+  return {n:n,w:w,w1:w1,ret:ret,worst:worst,last:last,replay:replay,seen:seen,run:run,b2b:b2b,
+          held:held,drift:safeDriftState(drift)};
 }
 /** The rule's own record at the dials as they are set: every race it would have played, in order. */
 function safeRecord(){
@@ -24995,10 +25036,12 @@ function safeRecord(){
     const verdictNow=function(){
       if(!(sel3&&sel3.length===3&&selRoad!=null&&selSlot!=null))return null;
       const p=boardP(); if(!p)return null;
-      let run=0; try{ run=safeRecord().run||0; }catch(e){}
+      let run=0, drift=null; try{ const rec=safeRecord(); run=rec.run||0; drift=rec.drift||null; }catch(e){}
       const c=safeCfg();
       const v=safeVerdict(p,marketPrices(),safeNeed(run,c.pair),c.ret);
-      v.base=c.pair; v.ret=c.ret;
+      v.base=c.pair; v.ret=c.ret; v.drift=drift;
+      // the fuse: a play it would make is held while the Brain is running well below itself
+      if(v.play&&drift&&drift.paused){ v.play=false; v.why='drift'; }
       return v;
     };
     const html=function(){
@@ -25008,6 +25051,8 @@ function safeRecord(){
       let line;
       if(v.why==='wait')line='<span style="color:var(--text3)">⏳ Waiting for the prices on this board.</span>';
       else if(v.why==='floor')line='<b style="color:var(--accent2)">⛔ SKIP</b> <span style="color:var(--text2)">no pair pays '+SAFE_FLOOR.toFixed(1)+'x on both vehicles.</span>';
+      else if(v.why==='drift')line='<b style="color:var(--gold)">⏸ PAUSED</b> <span style="color:var(--text2)">the Human Brain got only '+v.drift.got+' of its last '+v.drift.n+
+        ' races ('+Math.round(v.drift.recent*100)+'%); it usually gets '+Math.round(v.drift.usual*100)+'%. The game may have changed &mdash; Safe Bet waits until that recovers.</span>';
       else if(v.why==='ret')line='<b style="color:var(--accent2)">⛔ SKIP</b> <span style="color:var(--text2)">no pair paying '+SAFE_FLOOR.toFixed(1)+
         'x+ on both would return '+v.ret.toFixed(2)+'x on a win.</span>';
       else if(!v.play)line='<b style="color:var(--accent2)">⛔ SKIP</b> <span style="color:var(--text2)">best pair '+
@@ -25015,7 +25060,10 @@ function safeRecord(){
         nm(v.a)+' + '+nm(v.b)+' at '+(Math.floor(v.q*1000)/10).toFixed(1)+'% &mdash; needs '+Math.round(v.need*100)+'%'+
         (v.need>v.base?' after two losses in a row':'')+'.</span>';
       else line='<b style="color:var(--green)">✅ PLAY</b> <span style="color:var(--text)"><b>'+nm(v.a)+' + '+nm(v.b)+'</b> &mdash; Brain '+
-        Math.round(v.q*100)+'% · pays '+v.pa.toFixed(1)+' / '+v.pb.toFixed(1)+' (split '+(v.pa*v.pb/(v.pa+v.pb)).toFixed(2)+'x)</span>';
+        Math.round(v.q*100)+'% · pays '+v.pa.toFixed(1)+' / '+v.pb.toFixed(1)+' (split '+(v.pa*v.pb/(v.pa+v.pb)).toFixed(2)+'x)</span>'+
+        // what the bet has to beat: a split stake that comes back 1.09x only pays if it wins more than 92 times in 100
+        '<br><span style="color:var(--text3);font-size:9.5px">Break-even: it must win more than <b style="color:var(--text2)">'+
+        Math.ceil(100*(v.pa+v.pb)/(v.pa*v.pb))+' in 100</b> at these prices.</span>';
       return '<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">'+
           '<span style="font-size:10px;font-weight:900;color:var(--accent);letter-spacing:.4px">🧠 SAFE BET</span>'+
           '<span style="font-size:8.5px;color:var(--text3)">'+Math.round((v.need||v.base)*100)+'% · both &ge;'+SAFE_FLOOR.toFixed(1)+'x'+
@@ -25093,6 +25141,7 @@ function safeRecord(){
             '<div style="font-size:10px;color:var(--text2);margin-top:4px;line-height:1.6">'+
               (x.n?('<b style="color:var(--text)">'+pct(x.hit)+'</b> won ('+x.rec.w+'/'+x.n+') · CTWL <b style="color:'+(x.rec.worst<=2?'var(--green)':'var(--accent2)')+'">'+x.rec.worst+'</b>'+
                     ' · <b style="color:'+col+'">'+(x.per>=0?'+':'')+pct(x.per)+'</b> per bet · a win pays '+x.win.toFixed(2)+'x'+
+                    ' (break-even '+Math.ceil(100/x.win)+'%)'+
                     ' · plays 1 race in '+Math.max(1,Math.round(seen/x.n)))
                    :'never played on your races')+
             '</div>'+(why?'<div style="font-size:9px;color:var(--gold);margin-top:2px">'+why+'</div>':'')+'</div>';
@@ -25107,6 +25156,19 @@ function safeRecord(){
         let h='<p style="font-size:11px;line-height:1.6">Safe Bet plays a pair only when the Human Brain is sure enough of it <b>and</b> both vehicles pay at least '+SAFE_FLOOR.toFixed(1)+
           'x. You can also ask that <b>a win pays more</b>. Every setting below was replayed over <b>'+seen+'</b> of your own logged races, on the prices they closed at.</p>'+
           '<p style="font-size:10px;color:var(--text3);line-height:1.6">Bigger wins come from pairs the other players doubt, and those lose more often &mdash; so a setting either wins often and pays little, or pays more and loses more. Nothing here is a promise: it is what happened on these races.</p>';
+        // the drift watch, as it reads now
+        try{
+          const dr=cur.rec.drift;
+          if(dr&&dr.n){
+            h+='<p style="font-size:10px;line-height:1.6;color:'+(dr.paused?'var(--gold)':'var(--text3)')+'">'+
+              (dr.paused?'⏸ <b>Paused.</b> ':'🩺 <b style="color:var(--text2)">Brain watch.</b> ')+
+              'The Human Brain got '+dr.got+' of its last '+dr.n+' races ('+Math.round(dr.recent*100)+'%)'+
+              (dr.usual!=null?'; over all '+dr.seen+' it gets '+Math.round(dr.usual*100)+'%':'')+'. '+
+              (dr.armed?('Safe Bet pauses by itself if the last '+SAFE_DRIFT_N+' fall under '+Math.round(dr.floor*100)+'% &mdash; a sign the game has changed.')
+                       :('The watch starts once the Brain has '+SAFE_DRIFT_MIN+' races behind it.'))+
+              (cur.rec.held?' It sat out '+cur.rec.held+(cur.rec.held===1?' play':' plays')+' that way on these races.':'')+'</p>';
+          }
+        }catch(e){}
         if(seen<150)h+='<p style="font-size:10.5px;color:var(--gold);line-height:1.6">⚠️ Only '+seen+' races to test on. With so few, every number below is mostly luck &mdash; keep the standard setting until the app has a few hundred.</p>';
         h+='<h4>IN USE NOW</h4>'+row(cur,ok(cur)?'':(cur.n?whyNot(cur):''));
         h+='<h4>✅ MET YOUR TARGETS ON YOUR RACES</h4>'+
@@ -25575,6 +25637,20 @@ test('Safe Bet plays only a pair paying 1.7x on both that the Brain gives 95%, a
   assert.strictEqual(JSON.stringify(env.safeCfg()),'{"pair":0.95,"ret":1.2}');
   env.state.safePair=5;env.state.safeRet='x';
   assert.strictEqual(JSON.stringify(env.safeCfg()),'{"pair":0.95,"ret":0}','a setting that makes no sense is the standard one');
+  // the fuse: 160 races with the Brain at its usual 80%, then 50 where it gets 2 in 5 - Safe Bet stops by itself
+  // (99% pairs, so the 98% bar after two losses in a row never keeps one out and only the fuse can)
+  const br=(t,hit)=>Object.assign(race(t,hit?3:5,['1.8/2','2.6/2','9/2']),{brainP:[0.62,0.37,0.01],engineCalls:{BRAIN:{vi:3,vi2:4}}});
+  const usual=Array.from({length:160},(_,i)=>br(i+1,i%5!==0)), bad=Array.from({length:50},(_,i)=>br(200+i,i%5<2));
+  env.state.results=usual; env.state.safePair=0.95; env.state.safeRet=0;
+  let d=env.safeRecord();
+  assert(d.drift.armed&&!d.drift.paused&&d.held===0,'an ordinary 80%: watched, not paused');
+  env.state.results=usual.concat(bad);
+  d=env.safeRecord();
+  assert(d.drift.paused&&d.drift.got===20&&Math.abs(d.drift.usual-148/210)<1e-9,'20 of the last 50 against its usual rate: paused');
+  assert(d.held>0&&d.n+d.held===210,'and the plays it would have made in that stretch are sat out, not counted');
+  env.state.results=usual.concat(bad,Array.from({length:50},(_,i)=>br(300+i,i%5!==0)));
+  assert.strictEqual(env.safeRecord().drift.paused,false,'fifty races back at its usual rate: playing again');
+  assert.strictEqual(env.safeDriftState(env.safeDriftNew()).paused,false,'and with no record at all there is nothing to pause on');
 });
 
 test('Same Road and Diff Road wait for ten races, then give each vehicle its share of first picks',()=>{

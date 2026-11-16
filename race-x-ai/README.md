@@ -58,6 +58,11 @@ Every combination is replayed over the races logged on the phone, and the sheet
 shows which kept 90% with no more than two losses in a row. Bigger wins lose
 more often; the sheet shows by how much on those races.
 
+Under every PLAY the box gives the break-even: how often the bet has to win at
+those prices to be worth making. And Safe Bet pauses by itself when the Human
+Brain's last 50 races fall more than three standard errors under its usual
+rate - a fuse for the day the game itself is changed.
+
 Both halves are checked before the APK is built:
 
 - 55 board-reader checks run on a desktop (`desktop-check/RaceWatcherCheck.java`).

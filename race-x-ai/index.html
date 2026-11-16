@@ -4002,6 +4002,10 @@ async function loadCloudRaces(){
   // drawn the UI from local storage; rebuilding again caused a visible flash.
   if(_cloudChanged){
     _cloudChanged=false;
+    // a different history from the one start-up scored: forget what was derived
+    // from the old one, and score this one
+    try{recalcAllRates();}catch(e){}
+    try{backfillsSoon();}catch(e){}
     // Rebuilding the setup grid replaces every input with cloud values. If the
     // person is part-way through typing their rates, that silently throws the
     // lot away - which is exactly how entered rates "did not save". Leave the
@@ -6726,6 +6730,7 @@ function brainBackfill(quiet){
   const want=r=>r&&r.winner!=null&&(r.t||0)>=cutoff&&r.engineCalls&&!r.engineCalls.BRAIN&&
     aiScoredRace(r)&&r.vehicles&&r.vehicles.length===3&&r.road!=null&&r.slot!=null;
   if(!(state.results||[]).some(want))return 0;
+  const src=state.results;
   const all=(state.results||[]).filter(Boolean).slice().sort((a,b)=>(a.t||0)-(b.t||0));
   const job=_brainFill={i:0,filled:0,prefix:[]};
   const later=(typeof requestIdleCallback==='function')
@@ -6733,6 +6738,9 @@ function brainBackfill(quiet){
     : function(f){ setTimeout(f,16); };
   const step=function(deadline){
     if(_brainFill!==job)return;
+    // the history was replaced under it (a restored backup, the cloud copy): what it
+    // was writing on is gone, so it starts again on the races that are there now
+    if(state.results!==src){ _brainFill=null; try{ brainBackfill(quiet); }catch(e){} return; }
     const t0=Date.now();
     const budget=Math.min(8,(deadline&&deadline.timeRemaining)?Math.max(2,deadline.timeRemaining()):8);
     while(job.i<all.length&&Date.now()-t0<budget){
@@ -10754,23 +10762,25 @@ function histWhyHTML(KEY){
     if(h.n<HIST_MIN)
       return box('<span style="color:var(--text3);font-weight:800">NO CALL YET</span>'+
         '<span style="color:var(--text2)">needs '+HIST_MIN+' past races of these three '+where+
-        ' &mdash; has '+h.n+'</span>');
+        ' &mdash; has '+h.n+' ('+(h.n-h.mine)+' built into the app, '+h.mine+' from your own log)</span>');
     const c=engHIST(KEY,sel3,selRoad,selSlot);
     const by=[0,1,2].sort(function(a,b){ return (h.p[b]-h.p[a])||(a-b); });
-    const shares=by.map(function(i){ const v=ALL_VEHICLES[h.t[i]];
-      return v.icon+' '+h.w[i]+'/'+h.n; }).join(' &middot; ');
+    const veh=function(vi){ const v=ALL_VEHICLES[vi]; return v.icon+' '+v.name; };
+    const shares=by.map(function(i){ return veh(h.t[i])+' '+h.w[i]; }).join(' &middot; ');
     const fi=h.t.indexOf(c.vi);
-    const turn=(fi>=0&&fi!==by[0]&&h.p[fi]>0)
-      ? '<span style="flex-basis:100%;height:0"></span>'+
-        '<span style="color:var(--gold);font-weight:800">🎲 ITS TURN</span>'+
-        '<span style="color:var(--text)">'+ALL_VEHICLES[c.vi].icon+' '+ALL_VEHICLES[c.vi].name+
-        ' has won '+h.w[fi]+' of '+h.n+' &mdash; first pick about 1 call in '+
-        Math.max(2,Math.round(1/h.p[fi]))+'</span>'
-      : '';
-    return box('<span style="color:var(--text3);font-weight:800">SEEN</span>'+
-      '<span style="color:var(--text);font-weight:800">'+h.n+' times '+where+
-      (h.mine?' ('+h.mine+' yours)':'')+'</span>'+
-      '<span style="color:var(--text2)">'+shares+'</span>'+turn);
+    const turn=(fi>=0&&fi!==by[0]&&h.p[fi]>0);
+    const br='<span style="flex-basis:100%;height:0"></span>';
+    return box(
+      // what it is betting on, in words - the three icons above do not say which two
+      '<span style="color:var(--green);font-weight:900">PLAYS</span>'+
+      '<span style="color:var(--text);font-weight:800">'+veh(c.vi)+' + '+veh(c.vi2)+'</span>'+
+      '<span style="color:var(--text3)">&middot; leaves out '+veh(c.vi3)+'</span>'+br+
+      '<span style="color:var(--text3);font-weight:800">WHY</span>'+
+      '<span style="color:var(--text2)">these three met '+h.n+' times '+where+' &mdash; wins: '+shares+'</span>'+br+
+      '<span style="color:var(--text3)">'+(h.n-h.mine)+' of those races are built into the app, '+h.mine+' are from your own log</span>'+
+      (turn ? br+'<span style="color:var(--gold);font-weight:800">🎲 LONG SHOT\'S TURN</span>'+
+        '<span style="color:var(--text)">'+veh(c.vi)+' is first pick this time: it has won '+h.w[fi]+' of '+h.n+
+        ', so it gets about 1 call in '+Math.max(2,Math.round(1/h.p[fi]))+'</span>' : ''));
   }catch(e){ return ''; }
 }
 /**
@@ -10782,20 +10792,24 @@ function histWhyHTML(KEY){
  * board at the time) gets no call, exactly as it would not have then. Nothing
  * else on any race is touched. In idle slices, once per start.
  */
-let _histFill=null,_histFilled=false;
+let _histFill=null,_histDoneFor=null;
 function histBackfill(quiet){
-  if(_histFill||_histFilled)return 0;
+  // done once per history, not once per start: a backup restored or a cloud copy
+  // loaded after start-up is a different history, and it gets its own replay
+  if(_histFill||_histDoneFor===state.results)return 0;
   const cutoff=state.accResetT||0;
   const want=function(r,K){ return r&&r.winner!=null&&(r.t||0)>=cutoff&&r.engineCalls&&!r.engineCalls[K]&&
     aiScoredRace(r)&&r.vehicles&&r.vehicles.length===3&&r.road!=null&&r.slot!=null; };
   const all=(state.results||[]).filter(Boolean).slice().sort(function(a,b){ return (a.t||0)-(b.t||0); });
-  if(!all.some(function(r){ return want(r,'SAMEROAD')||want(r,'DIFFROAD'); })){ _histFilled=true; return 0; }
+  const src=state.results;
+  if(!all.some(function(r){ return want(r,'SAMEROAD')||want(r,'DIFFROAD'); })){ _histDoneFor=src; return 0; }
   const job=_histFill={i:0,filled:0,T:histTallyNew()};
   const later=(typeof requestIdleCallback==='function')
     ? function(f){ requestIdleCallback(f,{timeout:300}); }
     : function(f){ setTimeout(f,16); };
   const step=function(deadline){
     if(_histFill!==job)return;
+    if(state.results!==src){ _histFill=null; try{ histBackfill(quiet); }catch(e){} return; }
     const t0=Date.now();
     const budget=Math.min(8,(deadline&&deadline.timeRemaining)?Math.max(2,deadline.timeRemaining()):8);
     while(job.i<all.length&&Date.now()-t0<budget){
@@ -10814,7 +10828,7 @@ function histBackfill(quiet){
       histAdd(job.T,r);      // after its own call: a race is never part of its own history
     }
     if(job.i<all.length){ later(step); return; }
-    _histFill=null; _histFilled=true;
+    _histFill=null; _histDoneFor=src;
     if(!job.filled)return;
     window.rxCallsGen=(window.rxCallsGen||0)+1;
     try{invalidateRoadTable();}catch(e){}
@@ -10824,6 +10838,8 @@ function histBackfill(quiet){
     save();
     if(!quiet)showToast('🔁 Same Road and 🔀 Diff Road scored across your past races','#00E5A0');
     try{refreshActiveTab();}catch(e){}
+    // and the board on screen, whose two rows still say "no data yet"
+    try{ if(sel3&&sel3.length===3&&selRoad!=null&&selSlot!=null&&aiReady())showPredBox(); }catch(e){}
   };
   later(step);
   return 0;
@@ -12728,6 +12744,7 @@ function importData(input){
       // replaces would have kept serving win rates derived from the discarded
       // history until the next race was logged.
       try{recalcAllRates();}catch(e){}
+      try{backfillsSoon();}catch(e){}       // the new models score the restored races too
       if(typeof buildLogUI==='function')buildLogUI();
       if(typeof renderAll==='function')renderAll();
       if(typeof updateProgress==='function')updateProgress();
@@ -15806,6 +15823,23 @@ function deleteRace(t,num){
  *              25 races, still trained on the race that was removed.
  *   _surfWFit  the same, for the width model.
  */
+/**
+ * THE HISTORY WAS REPLACED: A RESTORED BACKUP, OR THE CLOUD COPY.
+ *
+ * The models that score past races in the background (Human Brain, Same Road,
+ * Diff Road, and the chances Safe Bet reads) did it once, at start-up - so a
+ * backup restored afterwards sat there with "no data yet" against all of them
+ * until the app was closed and opened again. This runs them again, in the same
+ * idle slices, on the races that are there now.
+ */
+function backfillsSoon(){
+  const go=function(){
+    try{brainBackfill(true);}catch(e){}
+    try{histBackfill(false);}catch(e){}
+    try{ if(typeof safeFill==='function')safeFill(); }catch(e){}
+  };
+  if(typeof requestIdleCallback==='function')requestIdleCallback(go,{timeout:1500}); else setTimeout(go,300);
+}
 function recalcAllRates(){
   try{ invalidateWR(); }catch(e){}
   // and any background fit still running on the history as it was is dropped
@@ -25130,9 +25164,11 @@ function safeRecord(){
       const all=(state.results||[]).filter(Boolean).slice().sort((a,b)=>(a.t||0)-(b.t||0));
       if(!all.some(r=>!r.brainP&&r.vehicles&&r.vehicles.length===3&&r.road!=null&&r.slot!=null))return;
       window.__safeFill=true;
+      const src=state.results;
       let i=0,filled=0; const prefix=[];
       const later=(typeof requestIdleCallback==='function')?function(f){ requestIdleCallback(f,{timeout:500}); }:function(f){ setTimeout(f,16); };
       const step=function(dl){
+        if(state.results!==src){ window.__safeFill=false; try{ safeFill(); }catch(e){} return; }
         const t0=Date.now(), budget=Math.min(8,(dl&&dl.timeRemaining)?Math.max(2,dl.timeRemaining()):8);
         while(i<all.length&&Date.now()-t0<budget){
           const r=all[i++];

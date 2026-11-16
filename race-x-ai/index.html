@@ -2941,7 +2941,7 @@ function menuGo(what){
       'roads seen lately, pictures every track they could make and races the three on each. It takes '+
       'the risky vehicle when the hidden roads probably suit it, and it votes in every Consensus row.<br>'+
       '<b>&#128257; Same Road</b> and <b>&#128256; Diff Road</b> &mdash; look up what happened the last times '+
-      'these same three vehicles met (on this road, or on any road). No call before ten past races; '+
+      'these same three vehicles met in your own races (on this road, or on any road). No call before ten past races; '+
       'then each vehicle is the first pick as often as it has won, so the long shot gets its turn. '+
       'They do not vote.<br>'+
       '<b>Numbers &#128290;</b> &mdash; reads only the run of winning positions. It has scored '+
@@ -3172,8 +3172,8 @@ function menuGo(what){
       '<p>Two different <b>mixes of payout and road</b> weighting. The numbers are the ratio each uses. Having both lets you see which balance suits the game better over time.</p>'+
 
       '<h4>&#128257; SAME ROAD &nbsp;&middot;&nbsp; &#128256; DIFF ROAD</h4>'+
-      '<p>Two models that do no reasoning at all: they <b>look up the board</b>. The same three vehicles have lined up before &mdash; who won, and how often? <b>Same Road</b> counts only races with the same three vehicles <b>and</b> the same road on show; <b>Diff Road</b> counts the same three vehicles on any road. The count starts from the 4,779 races built into the app and every race you log is added.</p>'+
-      '<p><b>Not before ten.</b> With fewer than ten past races of that board the model makes no call &mdash; its row says how many it has, and the voice stays quiet if you have it selected.</p>'+
+      '<p>Two models that do no reasoning at all: they <b>look up the board</b>. The same three vehicles have lined up before &mdash; who won, and how often? <b>Same Road</b> counts only races with the same three vehicles <b>and</b> the same road on show; <b>Diff Road</b> counts the same three vehicles on any road. <b>Only the races logged in this phone are counted</b> &mdash; nothing built into the app &mdash; because the game&rsquo;s pattern changes from day to day. A reset empties the count with the history, and they start again from the first race after it.</p>'+
+      '<p><b>Not before ten.</b> With fewer than ten past races of that board the model makes no call &mdash; its row says how many it has, and the voice stays quiet if you have it selected. That takes a while: there are 84 different sets of three vehicles, so Diff Road starts calling most boards after roughly 800&ndash;1,200 races, and Same Road (504 boards) needs several thousand.</p>'+
       '<p><b>By share, not always the favourite.</b> Each vehicle is the <b>first pick</b> as often as it has won. On a board that went 6 / 3 / 1, ten calls name the first vehicle six times, the second three times and the long shot once &mdash; and a vehicle that has won one time in N is never left N calls without its turn. The row says <b>&#127922; ITS TURN</b> when that is why. The second pick is always the stronger of the other two.</p>'+
       '<p style="font-size:11px;color:#8a8a8a">Naming the long shot on its turn costs a few points of accuracy against always naming the two favourites &mdash; that is the price of a model that is not the same answer every time. They get no Consensus vote, and Best, Adaptive and Road Expert never follow them; tick one yourself to hear it.</p>'+
 
@@ -10644,8 +10644,11 @@ function brainWhyHTML(){
 
    NOT BEFORE TEN. With fewer than ten past races of that board a count means
    nothing, so the model makes no call at all - its row says how many it has.
-   The count starts from the 4,779 races built into the app (the table Edge
-   used) and every race logged here is added to it.
+
+   ONLY THE RACES LOGGED ON THIS PHONE. The game's pattern changes from day to
+   day, so a table of old races is not evidence about today's - nothing built
+   into the app is counted. The count is the history and nothing else: a reset
+   empties both, and the model starts again from the first race logged after.
 
    BY SHARE, NOT ALWAYS THE FAVOURITE. A model that always names the vehicle
    that has won most never once names the one that wins one time in ten - and
@@ -10703,7 +10706,7 @@ function histLiveTally(){
 /**
  * Everything one model knows about one board.
  *   t      the three vehicles, sorted       w / n   wins each, and races counted
- *   mine   how many of those races are from this phone's own log
+ *   mine   the same count as n - every race it knows is from this phone's own log
  *   q / m  this model's own earlier first picks on the board, and how many calls
  */
 function histThink(vis,roadI,KEY,src){
@@ -10711,9 +10714,7 @@ function histThink(vis,roadI,KEY,src){
   const T=(src&&src.isHistTally)?src:(src?histTallyOf(src):histLiveTally());
   const same=(KEY==='SAMEROAD'), t=histTrio(vis), tk=t.join(',');
   const w=[0,0,0]; let n=0;
-  const seed=function(s){ if(s&&s.length===4){ w[0]+=s[0]; w[1]+=s[1]; w[2]+=s[2]; n+=s[3]; } };
-  if(same)seed(EDGE_BOARD[tk+'|'+roadI]);
-  else for(let r=0;r<ROADS.length;r++)seed(EDGE_BOARD[tk+'|'+r]);
+  // no built-in table: the races in the log are the whole of what it knows
   const cell=same?T.same[tk+'|'+roadI]:T.any[tk];
   let mine=0, q=[0,0,0], since=[0,0,0], m=0;
   if(cell){ w[0]+=cell.w[0]; w[1]+=cell.w[1]; w[2]+=cell.w[2]; n+=cell.n; mine=cell.n;
@@ -10762,7 +10763,7 @@ function histWhyHTML(KEY){
     if(h.n<HIST_MIN)
       return box('<span style="color:var(--text3);font-weight:800">NO CALL YET</span>'+
         '<span style="color:var(--text2)">needs '+HIST_MIN+' past races of these three '+where+
-        ' &mdash; has '+h.n+' ('+(h.n-h.mine)+' built into the app, '+h.mine+' from your own log)</span>');
+        ' in your own log &mdash; has '+h.n+'. Old races built into the app are not counted, and a reset starts it again from nothing.</span>');
     const c=engHIST(KEY,sel3,selRoad,selSlot);
     const by=[0,1,2].sort(function(a,b){ return (h.p[b]-h.p[a])||(a-b); });
     const veh=function(vi){ const v=ALL_VEHICLES[vi]; return v.icon+' '+v.name; };
@@ -10776,8 +10777,7 @@ function histWhyHTML(KEY){
       '<span style="color:var(--text);font-weight:800">'+veh(c.vi)+' + '+veh(c.vi2)+'</span>'+
       '<span style="color:var(--text3)">&middot; leaves out '+veh(c.vi3)+'</span>'+br+
       '<span style="color:var(--text3);font-weight:800">WHY</span>'+
-      '<span style="color:var(--text2)">these three met '+h.n+' times '+where+' &mdash; wins: '+shares+'</span>'+br+
-      '<span style="color:var(--text3)">'+(h.n-h.mine)+' of those races are built into the app, '+h.mine+' are from your own log</span>'+
+      '<span style="color:var(--text2)">in your own races these three met '+h.n+' times '+where+' &mdash; wins: '+shares+'</span>'+
       (turn ? br+'<span style="color:var(--gold);font-weight:800">🎲 LONG SHOT\'S TURN</span>'+
         '<span style="color:var(--text)">'+veh(c.vi)+' is first pick this time: it has won '+h.w[fi]+' of '+h.n+
         ', so it gets about 1 call in '+Math.max(2,Math.round(1/h.p[fi]))+'</span>' : ''));
@@ -25578,20 +25578,27 @@ test('Safe Bet plays only a pair paying 1.7x on both that the Brain gives 95%, a
 });
 
 test('Same Road and Diff Road wait for ten races, then give each vehicle its share of first picks',()=>{
+  // a table built into the app, as big as you like: it must count for nothing
   const env={console,Math,JSON,Object,Array,ROADS:[0,1,2,3,4,5],state:{results:[],accResetT:0},window:{},
-    EDGE_BOARD:{'0,4,8|2':[60,30,10,100],'1,2,3|0':[3,2,1,6],'1,2,3|5':[2,2,1,5]}};
+    EDGE_BOARD:{'0,4,8|2':[600,300,100,1000],'1,2,3|0':[30,20,10,60],'1,2,3|5':[20,20,10,50]}};
   vm.createContext(env);
   vm.runInContext('historyMemo=(n,f)=>f();aiScoredRace=()=>true;save=()=>{};showToast=()=>{};refreshActiveTab=()=>{};'+
     'renderMemoClear=()=>{};invalidateRoadTable=()=>{};setTimeout=f=>f();',env);
   vm.runInContext(html.match(/\/\* RXA_HIST_START[\s\S]*?\/\* RXA_HIST_END \*\//)[0].replace(/^const /gm,'var '),env);
+  const log=(vis,road,winners,t0)=>winners.map((w,i)=>({t:(t0||0)+i+1,vehicles:vis,road,slot:0,winner:w,engineCalls:{}}));
+  // only the phone's own races: after a reset there are none, and no call - whatever is built in
+  assert.strictEqual(env.engDIFFROAD([0,4,8],2,0,[]).vi,null,'an empty log: no call, the built-in table is not counted');
+  assert.strictEqual(env.histThink([0,4,8],2,'SAMEROAD',[]).n,0);
   // not before ten: 6 races on this road, 11 over all roads
-  assert.strictEqual(env.engSAMEROAD([1,2,3],0,0,[]).vi,null,'six races of the board: no call');
-  const any=env.engDIFFROAD([3,1,2],0,0,[]);
+  const few=log([1,2,3],0,[1,1,1,2,2,3]).concat(log([1,2,3],5,[1,1,2,2,3],100));
+  assert.strictEqual(env.engSAMEROAD([1,2,3],0,0,few).vi,null,'six races of the board: no call');
+  const any=env.engDIFFROAD([3,1,2],0,0,few);
   assert.strictEqual(any.vi,1,'the same three on any road: eleven races, and a call');
   assert.deepStrictEqual([any.pct,any.pct2,any.pct3],[45,36,18]);
-  assert.strictEqual(env.engSAMEROAD([0,4,8],3,0,[]).vi,null,'Same Road means the same road');
-  // by share: a board that has gone 60 / 30 / 10, forty calls, each logged with its call
-  const vis=[0,4,8],R=[],picks=[],wins=[0,0,0,0,0,0,4,4,4,8];
+  assert.strictEqual(env.engSAMEROAD([0,4,8],3,0,log([0,4,8],2,[0,0,0,0,0,0,4,4,4,8,0,4])).vi,null,'Same Road means the same road');
+  // by share: a board that has gone 60 / 30 / 10 in the log, then forty calls, each logged with its call
+  const vis=[0,4,8],wins=[0,0,0,0,0,0,4,4,4,8],picks=[];
+  const R=log(vis,2,Array.from({length:100},(_,i)=>wins[i%10]),-1000);
   for(let k=0;k<40;k++){
     const c=env.engSAMEROAD(vis,2,0,R);
     if(c.vi===8)assert.strictEqual(c.vi2,0,'the long shot\'s turn is covered by the favourite');
@@ -25604,9 +25611,9 @@ test('Same Road and Diff Road wait for ten races, then give each vehicle its sha
   assert(Math.max(wait,picks.length-last)<=11,'and the one-in-ten vehicle never waits past its window');
   assert.strictEqual(JSON.stringify(env.engSAMEROAD([8,0,4],2,1,R)),JSON.stringify(env.engSAMEROAD([4,8,0],2,2,R)),
     'the same board in another order is the same call');
-  assert.strictEqual(env.histThink(vis,2,'SAMEROAD',R).mine,40,'the races logged here are counted on top of the built-in ones');
+  const know=env.histThink(vis,2,'SAMEROAD',R);
+  assert(know.n===140&&know.mine===140,'everything it knows is the 140 races in the log');
   // the replay: each old race from the count before it, none from its own
-  env.EDGE_BOARD={};
   env.state.results=Array.from({length:14},(_,i)=>({t:i+1,vehicles:[5,6,7],road:1,slot:0,winner:[5,5,6,7][i%4],engineCalls:{CONSENSUS:{vi:5,vi2:6}}}));
   env.histBackfill(true);
   const got=env.state.results.map(r=>r.engineCalls.SAMEROAD?1:0).join('');

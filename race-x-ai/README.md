@@ -34,8 +34,8 @@ This repo is public, so neither secret is in the code. Add both under
 
 Two models that look up the board instead of reasoning about it: what happened
 the last times these same three vehicles met, on the same road (Same Road) or
-on any road (Diff Road). They count the 4,779 races built into the app plus
-every race logged on the phone.
+on any road (Diff Road). They count only the races logged on the phone -
+nothing built into the app - so a reset starts them again from nothing.
 
 - No call before ten past races of the board.
 - Each vehicle is the first pick as often as it has won, and a vehicle that has
